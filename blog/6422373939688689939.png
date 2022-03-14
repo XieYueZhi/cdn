@@ -1,0 +1,1469 @@
+# Spring中基于注解--ConfigurationClassPostProcessor
+
+基于注解的就是去处理这些注解
+
+@PropertySources、@PropertySource、@ComponentScan、@Bean、@Import、@ImportResource、@Configuration、@Value
+
+这些注解的处理都是类`ConfigurationClassPostProcessor`实现的。（@Value还会通过AutowiredAnnotationBeanPostProcessor处理）
+
+之前讲bean的初始化阶段都是基于`ClassPathXmlApplicationContext`这个上下文对象的，现在讲注解了，使用下面的上下文类`AnnotationConfigApplicationContext`，看下该类的类图：
+
+![image-20210315022102609](media/image-20210315022102609.png)
+
+> 从类图可以看到，该上下文类继承了`GenericApplicationContext`，而`GenericApplicationContext`实现了`BeanDefinitionRegistry`接口，也就是说上下文类`AnnotationConfigApplicationContext`将作为BeanDefinition的注册器。但如果继续看`GenericApplicationContext`：
+>
+> ![image-20210504201604173](media/image-20210504201604173.png)
+>
+> 将会发现这里只是使用了代理模式而已，`GenericApplicationContext`作为`DefaultListableBeanFactory`的代理类，真正的BeanDefinition的注册器还是`DefaultListableBeanFactory`。
+
+比如有下面这一代码段：
+
+```java
+@ComponentScans({@ComponentScan("xx"), @ComponentScan("aa")})
+@Component
+@ComponentScan(value = "com.enjoy.jack"/*,includeFilters = ,basePackages = */)
+//<context:property-placeholder location="classpath:application.properties"/>
+@PropertySource(name = "jack", value = "classpath:application.properties")
+public class ScanBean {
+}
+
+@Test
+public void test2() {
+    AnnotationConfigApplicationContext applicationContext = new AnnotationConfigApplicationContext(ScanBean.class);
+    StudentService bean = applicationContext.getBean(StudentService.class);
+    System.out.println(bean);
+      bean.sleep(new ArrayList());
+    bean.eat("Jack1");
+}
+```
+
+看`AnnotationConfigApplicationContext`的对应的构造方法
+
+```java
+public AnnotationConfigApplicationContext() {
+	this.reader = new AnnotatedBeanDefinitionReader(this);
+	this.scanner = new ClassPathBeanDefinitionScanner(this);
+}
+
+public AnnotationConfigApplicationContext(Class<?>... componentClasses) {
+	this();
+	register(componentClasses);
+	refresh();
+}
+```
+
+上面创建了两个对象，分别是`ClassPathBeanDefinitionScanner`和`AnnotatedBeanDefinitionReader`。
+`ClassPathBeanDefinitionScanner`之前已经说过了，它的作用就是扫描包，找有@Component等注解的类。而`AnnotatedBeanDefinitionReader`将在下面介绍它的职能。
+
+继续看下一行代码
+
+```java
+register(componentClasses);
+```
+
+实际的作用就是把ScanBean这个类封装成`AnnotatedGenericBeanDefinition`然后注册到`BeanDefinitionRegistry`，也就是`AnnotationConfigApplicationContext`中。
+
+```java
+@Override
+public void register(Class<?>... componentClasses) {
+	Assert.notEmpty(componentClasses, "At least one component class must be specified");
+	this.reader.register(componentClasses);
+} --->
+AnnotatedBeanDefinitionReader.register(Class<?>... componentClasses) --->
+AnnotatedBeanDefinitionReader.registerBean(Class<?> beanClass) --->
+AnnotatedBeanDefinitionReader.doRegisterBean
+```
+
+![image-20210504202924699](media/image-20210504202924699.png)
+
+从上面的代码可以发现一个问题，就是`AnnotationConfigApplicationContext`将类的信息封装成BeanDefinition这一步时委托给了`AnnotatedBeanDefinitionReader`这个对象完成的。而且，AnnotatedBeanDefinitionReader.deRegisterBean也就是这节重点讲解的方法。
+
+最后看
+
+```
+refresh();
+```
+
+AnnotationConfigApplicationContext没有重写refresh方法，所以refresh方法是从父类继承过来的
+
+`AbstractApplicationContext#refresh`，这段代码讲了很多次了。
+
+`AnnotationConfigApplicationContext`执行了`refresh`后，代码执行到了`obtainFreshBeanFactory`方法
+
+```java
+protected ConfigurableListableBeanFactory obtainFreshBeanFactory() {
+	//核心方法，必须读，重要程度：5
+	refreshBeanFactory();
+	return getBeanFactory();
+}
+```
+
+其中`refreshBeanFactory`方法有两个实现。
+
+![image-20210315023428930](media/image-20210315023428930.png)
+
+看回AnnotationConfigApplicationContext的类图，它的父类是`GenericApplicationContext`，所以`refreshBeanFactory`方法是从父类`GenericApplicationContext`继承过来的。
+
+现在看`GenericApplicationContext#refreshBeanFactory`方法。
+
+![image-20210315023710277](media/image-20210315023710277.png)
+
+它什么都不做，这里就和`ClassPathXmlApplicationContext`完全不同了，`ClassPathXmlApplicationContext`会在这里添加完成扫描和BeanDefinition的创建和注册，但在`AnnotationConfigApplicationContext`中，这里基本什么都不做。
+
+那BeanDefinition的创建和注册是在什么时候完成的？
+
+回到构造方法：
+
+![image-20210504203803176](media/image-20210504203803176.png)
+
+在初始化`AnnotationConfigApplicationContext`创建了`AnnotatedBeanDefinitionReader`，在上边已经简单的说了该类的作用，但去看该类的构造方法时会发现该类还有另一个作用。看下这个类的构造方法：
+
+```java
+// AnnotatedBeanDefinitionReader
+public AnnotatedBeanDefinitionReader(BeanDefinitionRegistry registry) {
+	this(registry, getOrCreateEnvironment(registry));
+}
+
+public AnnotatedBeanDefinitionReader(BeanDefinitionRegistry registry, Environment environment) {
+	Assert.notNull(registry, "BeanDefinitionRegistry must not be null");
+	Assert.notNull(environment, "Environment must not be null");
+	this.registry = registry;
+	this.conditionEvaluator = new ConditionEvaluator(registry, environment, null);
+	AnnotationConfigUtils.registerAnnotationConfigProcessors(this.registry);
+}
+```
+
+重点是这行代码。
+
+```java
+AnnotationConfigUtils.registerAnnotationConfigProcessors(this.registry);
+```
+
+还记得这行代码吗？在讲xml的自定义标签解析，解析这个时
+
+![image-20210315024934832](media/image-20210315024934832.png)
+
+讲过——在`ClassPathBeanDefinitionScanner`讲包的类扫描出来后，在对应的BeanDefinitionParser类——ComponentScanBeanDefinitionParser，把有对应的注解的类封装成ScannedGenericBeanDefinition后，在最后执行这一行代码:
+
+![image-20210315025059582](media/image-20210315025059582.png)
+
+![image-20210315025130770](media/image-20210315025130770.png)
+
+还记得这个方法的作用吗？
+
+这个方法会把一些`BeanPostProcessor`封装成RootBeanDefinition，注册到`BeanDefinitionRegistry`中
+
+![image-20210315025357419](media/image-20210315025357419.png)
+
+之前我们重点关注的是
+
+- `ConfigurationClassPostProcessor`
+- `AutowiredAnnotationBeanPostProcessor`
+- `CommonAnnotationBeanPostProcessor`
+
+在前面的章节已经讲过`AutowiredAnnotationBeanPostProcessor`和`CommonAnnotationBeanPostProcessor`，这两个类是在Bean的初始化步骤中，注解收集和依赖注入起到作用。剩下的`ConfigurationClassPostProcessor`还没讲过他的作用。我们看下`ConfigurationClassPostProcessor`的类图：
+
+![image-20210313024104673](media/image-20210313024104673.png)
+
+可以看到`ConfigurationClassPostProcessor`实现`BeanDefinitionRegistryPostProcessor`接口的，也就是说在`AbstractApplicationContext#refresh`方法执行到
+
+```
+invokeBeanFactoryPostProcessors(beanFactory)
+```
+
+这行代码时会触发`ConfigurationClassPostProcessor#postProcessBeanDefinitionRegistry`方法的调用。通过之前对`BeanDefinitionRegistryPostProcessor`的讲解，已经知道了postProcessBeanDefinitionRegistry方法就是对BeanDefinition做一些操作的，比如添加也是可以的。下面看`ConfigurationClassPostProcessor`类。
+
+
+
+## ConfigurationClassPostProcessor
+
+![image-20210313024104673](media/image-20210313024104673.png)
+
+看`ConfigurationClassPostProcessor#postProcessBeanDefinitionRegistry`源码：
+
+```java
+public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
+	int registryId = System.identityHashCode(registry);
+	if (this.registriesPostProcessed.contains(registryId)) {
+		throw new IllegalStateException(
+				"postProcessBeanDefinitionRegistry already called on this post-processor against " + registry);
+	}
+	if (this.factoriesPostProcessed.contains(registryId)) {
+		throw new IllegalStateException(
+				"postProcessBeanFactory already called on this post-processor against " + registry);
+	}
+	this.registriesPostProcessed.add(registryId);
+
+	//核心逻辑，重点看，重要程度5
+	processConfigBeanDefinitions(registry);
+}
+
+```
+### ConfigurationClassPostProcessor#processConfigBeanDefinitions
+
+```java
+public void processConfigBeanDefinitions(BeanDefinitionRegistry registry) {
+	List<BeanDefinitionHolder> configCandidates = new ArrayList<>();
+	//获取所有的beanNames
+	String[] candidateNames = registry.getBeanDefinitionNames();
+
+	for (String beanName : candidateNames) {
+		BeanDefinition beanDef = registry.getBeanDefinition(beanName);
+		//如果有该标识就不再处理
+		if (beanDef.getAttribute(ConfigurationClassUtils.CONFIGURATION_CLASS_ATTRIBUTE) != null) {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Bean definition has already been processed as a configuration class: " + beanDef);
+			}
+		}
+		//判断是否是候选的需要处理的BeanDefinition，如果是则放入容器configCandidates
+		else if (ConfigurationClassUtils.checkConfigurationClassCandidate(beanDef, this.metadataReaderFactory)) {
+			configCandidates.add(new BeanDefinitionHolder(beanDef, beanName));
+		}
+	}
+
+	// Return immediately if no @Configuration classes were found
+	//如果容器为空，则直接返回
+	if (configCandidates.isEmpty()) {
+		return;
+	}
+
+	// Sort by previously determined @Order value, if applicable
+	//对需要处理的所有beanDefinition排序
+	configCandidates.sort((bd1, bd2) -> {
+		int i1 = ConfigurationClassUtils.getOrder(bd1.getBeanDefinition());
+		int i2 = ConfigurationClassUtils.getOrder(bd2.getBeanDefinition());
+		return Integer.compare(i1, i2);
+	});
+
+	// Detect any custom bean name generation strategy supplied through the enclosing application context
+	SingletonBeanRegistry sbr = null;
+	if (registry instanceof SingletonBeanRegistry) {
+		sbr = (SingletonBeanRegistry) registry;
+		if (!this.localBeanNameGeneratorSet) {
+			BeanNameGenerator generator = (BeanNameGenerator) sbr.getSingleton(
+					AnnotationConfigUtils.CONFIGURATION_BEAN_NAME_GENERATOR);
+			if (generator != null) {
+				this.componentScanBeanNameGenerator = generator;
+				this.importBeanNameGenerator = generator;
+			}
+		}
+	}
+
+	if (this.environment == null) {
+		this.environment = new StandardEnvironment();
+	}
+
+	//候选BeanDefinition的解析器
+	// Parse each @Configuration class
+	ConfigurationClassParser parser = new ConfigurationClassParser(
+			this.metadataReaderFactory, this.problemReporter, this.environment,
+			this.resourceLoader, this.componentScanBeanNameGenerator, registry);
+
+	Set<BeanDefinitionHolder> candidates = new LinkedHashSet<>(configCandidates);
+	Set<ConfigurationClass> alreadyParsed = new HashSet<>(configCandidates.size());
+	do {
+		//解析核心流程，重点看，重要程度5
+		//其实就是把类上面的特殊注解解析出来最终封装成beanDefinition
+		parser.parse(candidates);
+		parser.validate();
+
+		Set<ConfigurationClass> configClasses = new LinkedHashSet<>(parser.getConfigurationClasses());
+		configClasses.removeAll(alreadyParsed);
+
+		// Read the model and create bean definitions based on its content
+		if (this.reader == null) {
+			this.reader = new ConfigurationClassBeanDefinitionReader(
+					registry, this.sourceExtractor, this.resourceLoader, this.environment,
+					this.importBeanNameGenerator, parser.getImportRegistry());
+		}
+		//@Bean @Import 内部类 @ImportedResource ImportBeanDefinitionRegistrar具体处理逻辑
+		this.reader.loadBeanDefinitions(configClasses);
+		//已经解析完成了的类
+		alreadyParsed.addAll(configClasses);
+
+		candidates.clear();
+		//比较差异又走一遍解析流程
+		if (registry.getBeanDefinitionCount() > candidateNames.length) {
+			String[] newCandidateNames = registry.getBeanDefinitionNames();
+			Set<String> oldCandidateNames = new HashSet<>(Arrays.asList(candidateNames));
+			Set<String> alreadyParsedClasses = new HashSet<>();
+			for (ConfigurationClass configurationClass : alreadyParsed) {
+				alreadyParsedClasses.add(configurationClass.getMetadata().getClassName());
+			}
+			for (String candidateName : newCandidateNames) {
+				if (!oldCandidateNames.contains(candidateName)) {
+					BeanDefinition bd = registry.getBeanDefinition(candidateName);
+					if (ConfigurationClassUtils.checkConfigurationClassCandidate(bd, this.metadataReaderFactory) &&
+							!alreadyParsedClasses.contains(bd.getBeanClassName())) {
+						candidates.add(new BeanDefinitionHolder(bd, candidateName));
+					}
+				}
+			}
+			candidateNames = newCandidateNames;
+		}
+	}
+	while (!candidates.isEmpty());
+
+	// Register the ImportRegistry as a bean in order to support ImportAware @Configuration classes
+	if (sbr != null && !sbr.containsSingleton(IMPORT_REGISTRY_BEAN_NAME)) {
+		sbr.registerSingleton(IMPORT_REGISTRY_BEAN_NAME, parser.getImportRegistry());
+	}
+
+	if (this.metadataReaderFactory instanceof CachingMetadataReaderFactory) {
+		// Clear cache in externally provided MetadataReaderFactory; this is a no-op
+		// for a shared cache since it'll be cleared by the ApplicationContext.
+		((CachingMetadataReaderFactory) this.metadataReaderFactory).clearCache();
+	}
+}
+```
+
+代码很长，这里我根据功能看.
+
+### 对需要生成BeanDefinition的类进行收集
+
+![image-20210315030711628](media/image-20210315030711628.png)
+
+```
+beanDef.getAttribute(ConfigurationClassUtils.CONFIGURATION_CLASS_ATTRIBUTE)
+```
+
+这个方法的作用就是看该BeanDefinition的属性中有没有
+`org.springframework.context.annotation.ConfigurationClassPostProcessor.configurationClass`这个key对应的属性值。在第一次的情况下该判断会返回false，所以这段代码主要看这行代码
+
+```
+ConfigurationClassUtils.checkConfigurationClassCandidate(beanDef, this.metadataReaderFactory)
+```
+
+看该方法的部分重要的代码段：
+
+![image-20210315032256379](media/image-20210315032256379.png)
+
+![image-20210504210946253](media/image-20210504210946253.png)
+
+![image-20210504210958726](media/image-20210504210958726.png)
+
+这里有两个逻辑，如果有`@Configuration`注解，就对BeanDefinition做如下标记:
+
+```java
+beanDef.setAttribute(CONFIGURATION_CLASS_ATTRIBUTE, CONFIGURATION_CLASS_FULL);
+org.springframework.context.annotation.ConfigurationClassPostProcessor.configurationClass=full
+```
+
+如果没有`@Configuration`但有`@Component、@PropertySource、@ComponentScan、@Bean、@Import、@ImportResource`注解的话就对BeanDefinition做如下标记:
+
+```
+beanDef.setAttribute(CONFIGURATION_CLASS_ATTRIBUTE, CONFIGURATION_CLASS_LITE);
+org.springframework.context.annotation.ConfigurationClassPostProcessor.configurationClass=lite
+```
+
+这个标记的作用在后面会讲到。
+
+最后：
+
+![image-20210504210607397](media/image-20210504210607397.png)
+
+如有有@Order注解，就取值并设置到BeanDefinition中。
+
+其实`ConfigurationClassUtils.checkConfigurationClassCandidate(beanDef, this.metadataReaderFactory)`
+
+整个流程就是判断为BeanDefinition是否有@Component、@PropertySource、@ComponentScan、@Bean、@Import、@ImportResource、@Configuration这类注解，有就做标记并返回true。true就代表这个BeanDefinition需要被``ConfigurationClassPostProcessor`进一步处理。
+
+![image-20210315033004112](media/image-20210315033004112.png)
+
+回到`ConfigurationClassPostProcessor#processConfigBeanDefinitions`
+
+![image-20210315033136669](media/image-20210315033136669.png)
+
+对需要处理的所有beanDefinition进行升序排序，接着就是重点了
+
+![image-20210315033946932](media/image-20210315033946932.png)
+
+## ConfigurationClassParser#parse
+
+看`ConfigurationClassParser#parse`
+
+```java
+public void parse(Set<BeanDefinitionHolder> configCandidates) {
+	for (BeanDefinitionHolder holder : configCandidates) {
+		BeanDefinition bd = holder.getBeanDefinition();
+		try {
+			//扫描注解得到的BeanDefinition
+			if (bd instanceof AnnotatedBeanDefinition) {
+				parse(((AnnotatedBeanDefinition) bd).getMetadata(), holder.getBeanName());
+			}
+			//非扫描注解得到的BeanDefinition
+			else if (bd instanceof AbstractBeanDefinition && ((AbstractBeanDefinition) bd).hasBeanClass()) {
+				parse(((AbstractBeanDefinition) bd).getBeanClass(), holder.getBeanName());
+			}
+			else {
+				parse(bd.getBeanClassName(), holder.getBeanName());
+			}
+		}
+		catch (BeanDefinitionStoreException ex) {
+			throw ex;
+		}
+		catch (Throwable ex) {
+			throw new BeanDefinitionStoreException(
+					"Failed to parse configuration class [" + bd.getBeanClassName() + "]", ex);
+		}
+	}
+	//这行代码不能忽视
+	this.deferredImportSelectorHandler.process();
+}
+```
+
+该方法的入参，就是之前收集的，有`@Component、@PropertySource、@ComponentScan、@Bean、@Import、@ImportResource、@Configuration`这些注解的类进行遍历解析。
+
+到了一个重点方法了，看parse方法
+
+```java
+protected final void parse(@Nullable String className, String beanName) throws IOException {
+	Assert.notNull(className, "No bean class name for configuration class bean definition");
+	MetadataReader reader = this.metadataReaderFactory.getMetadataReader(className);
+	processConfigurationClass(new ConfigurationClass(reader, beanName), DEFAULT_EXCLUSION_FILTER);
+}
+```
+
+看`processConfigurationClass`
+
+### ConfigurationClassParser#processConfigurationClass
+
+其实就是把类上面的注解解析出来最终封装成beanDefinition
+
+```java
+protected void processConfigurationClass(ConfigurationClass configClass, Predicate<String> filter) throws IOException {
+	// 对@Condition注解的支持，过滤掉不需要实例化的类
+	if (this.conditionEvaluator.shouldSkip(configClass.getMetadata(), ConfigurationPhase.PARSE_CONFIGURATION)) {
+		return;
+	}
+  //不关注的代码
+  ....
+
+	//这个对象理解为跟类或者接口对应，然后把metadata对象包装进去了
+	// Recursively process the configuration class and its superclass hierarchy.
+	SourceClass sourceClass = asSourceClass(configClass, filter);
+	do {
+		//核心代码，认真读
+		sourceClass = doProcessConfigurationClass(configClass, sourceClass, filter);
+	}
+	while (sourceClass != null);
+
+	this.configurationClasses.put(configClass, configClass);
+}
+```
+
+#### 条件判断
+
+![image-20210316021111104](media/image-20210316021111104.png)
+
+```java
+public boolean shouldSkip(@Nullable AnnotatedTypeMetadata metadata, @Nullable ConfigurationPhase phase) {
+	if (metadata == null || !metadata.isAnnotated(Conditional.class.getName())) {
+		return false;
+	}
+
+	if (phase == null) {
+		if (metadata instanceof AnnotationMetadata &&
+				ConfigurationClassUtils.isConfigurationCandidate((AnnotationMetadata) metadata)) {
+			return shouldSkip(metadata, ConfigurationPhase.PARSE_CONFIGURATION);
+		}
+		return shouldSkip(metadata, ConfigurationPhase.REGISTER_BEAN);
+	}
+
+	List<Condition> conditions = new ArrayList<>();
+	//获取@Conditional注解的value值
+	for (String[] conditionClasses : getConditionClasses(metadata)) {
+		for (String conditionClass : conditionClasses) {
+			//反射实例化Condition对象
+			Condition condition = getCondition(conditionClass, this.context.getClassLoader());
+			conditions.add(condition);
+		}
+	}
+
+	//排序
+	AnnotationAwareOrderComparator.sort(conditions);
+
+	//调用每一个condition的matches方法
+	for (Condition condition : conditions) {
+		ConfigurationPhase requiredPhase = null;
+		if (condition instanceof ConfigurationCondition) {
+			requiredPhase = ((ConfigurationCondition) condition).getConfigurationPhase();
+		}
+		//调用matches方法
+		if ((requiredPhase == null || requiredPhase == phase) && !condition.matches(this.context, metadata)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+```
+
+这段代码的作用就是，当我有这样的注解时
+
+![image-20210316021248942](media/image-20210316021248942.png)
+
+对应的类
+
+```java
+public class CustomCondition implements Condition {
+    @Override
+    public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+        return true;
+    }
+}
+```
+
+也就是，直到CustomCondition的matchs返回为true上面的代码才会玩下走，也就是BeanDefinition才能生成。
+
+也可以自定义条件注解
+
+##### 自定义条件注解
+
+```java
+@Target({ ElementType.TYPE, ElementType.METHOD })
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+@Conditional(value = OnClassCondition.class)
+public @interface ConditionOnClass {
+    Class<?>[] value() default {};
+
+    String[] name() default {};
+}
+
+```
+
+```java
+public class OnClassCondition implements Condition {
+    @Override
+    public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+        if(metadata.isAnnotated(ConditionOnClass.class.getName())) {
+            Map<String, Object> annotationAttributes = metadata.getAnnotationAttributes(ConditionOnClass.class.getName());
+            try {
+                ClassUtils.forName(annotationAttributes.get("name").toString(),ClassUtils.getDefaultClassLoader());
+                return true;
+            } catch (ClassNotFoundException e) {
+                e.printStackTrace();
+                return false;
+            }
+        }
+        return false;
+    }
+}
+```
+
+使用：
+
+```java
+@Component
+@Conditional(value = {CustomCondition.class,CustomCondition1.class})
+@ConditionOnClass(name = "com.enjoy.jack.bean.circular.CircularRefConB")
+
+@ConditionOnProperty(name = "cn.enjoy.flag")
+public class ConditionalBean {
+}
+```
+
+接着看`processConfigurationClass`方法
+
+#### 需要生成BeanDefinition的类的收集和一些接口的执行
+
+核心看`ConfigurationClassParser#doProcessConfigurationClass`
+
+```java
+protected final SourceClass doProcessConfigurationClass(
+		ConfigurationClass configClass, SourceClass sourceClass, Predicate<String> filter)
+		throws IOException {
+
+	//判断类上面是否有Component注解
+	if (configClass.getMetadata().isAnnotated(Component.class.getName())) {
+		// Recursively process any member (nested) classes first
+		//递归处理有@Component、@PropertySource、@ComponentScan、@Bean、@Import、@ImportResource注解的内部类
+		processMemberClasses(configClass, sourceClass, filter);
+	}
+
+	// Process any @PropertySource annotations
+	//处理PropertySources和 PropertySource注解
+	for (AnnotationAttributes propertySource : AnnotationConfigUtils.attributesForRepeatable(
+			sourceClass.getMetadata(), PropertySources.class,
+			org.springframework.context.annotation.PropertySource.class)) {
+		if (this.environment instanceof ConfigurableEnvironment) {
+			//核心逻辑
+			processPropertySource(propertySource);
+		}
+		else {
+			logger.info("Ignoring @PropertySource annotation on [" + sourceClass.getMetadata().getClassName() +
+					"]. Reason: Environment must implement ConfigurableEnvironment");
+		}
+	}
+
+	// Process any @ComponentScan annotations
+	//处理ComponentScans和ComponentScan注解
+	Set<AnnotationAttributes> componentScans = AnnotationConfigUtils.attributesForRepeatable(
+			sourceClass.getMetadata(), ComponentScans.class, ComponentScan.class);
+	//是否需要跳过
+	if (!componentScans.isEmpty() &&
+			!this.conditionEvaluator.shouldSkip(sourceClass.getMetadata(), ConfigurationPhase.REGISTER_BEAN)) {
+		for (AnnotationAttributes componentScan : componentScans) {
+			// The config class is annotated with @ComponentScan -> perform the scan immediately
+			//这个parse里面的逻辑，基本上跟我们<component-scan>自定义标签解析的逻辑差不多
+			Set<BeanDefinitionHolder> scannedBeanDefinitions =
+					this.componentScanParser.parse(componentScan, sourceClass.getMetadata().getClassName());
+			// Check the set of scanned definitions for any further config classes and parse recursively if needed
+			//这里又去递归，扫描到@Component生成beanDefinition后，又递归去校验类上面是否有特殊注解
+			for (BeanDefinitionHolder holder : scannedBeanDefinitions) {
+				BeanDefinition bdCand = holder.getBeanDefinition().getOriginatingBeanDefinition();
+				if (bdCand == null) {
+					bdCand = holder.getBeanDefinition();
+				}
+				//判断是否是候选的BeanDefinition，如果是又parse
+				if (ConfigurationClassUtils.checkConfigurationClassCandidate(bdCand, this.metadataReaderFactory)) {
+					parse(bdCand.getBeanClassName(), holder.getBeanName());
+				}
+			}
+		}
+	}
+
+	//处理@Import注解 getImports(sourceClass) 获取类上面的@Import注解并封装成SourceClass
+	// Process any @Import annotations
+	processImports(configClass, sourceClass, getImports(sourceClass), filter, true);
+
+	//处理@ImportResource注解 ，没啥用，加载xml配置文件
+	// Process any @ImportResource annotations
+	AnnotationAttributes importResource =
+			AnnotationConfigUtils.attributesFor(sourceClass.getMetadata(), ImportResource.class);
+	if (importResource != null) {
+		String[] resources = importResource.getStringArray("locations");
+		Class<? extends BeanDefinitionReader> readerClass = importResource.getClass("reader");
+		for (String resource : resources) {
+			String resolvedResource = this.environment.resolveRequiredPlaceholders(resource);
+			//建立xml文件和reader的映射关系
+			configClass.addImportedResource(resolvedResource, readerClass);
+		}
+	}
+
+	//处理@Bean注解，重点
+	// Process individual @Bean methods
+	//收集有@bean 注解的方法
+	Set<MethodMetadata> beanMethods = retrieveBeanMethodMetadata(sourceClass);
+	for (MethodMetadata methodMetadata : beanMethods) {
+		//加入到ConfigurationClass中
+		configClass.addBeanMethod(new BeanMethod(methodMetadata, configClass));
+	}
+
+	//处理接口里面方法有@Bean注解的，逻辑差不多
+	// Process default methods on interfaces
+	processInterfaces(configClass, sourceClass);
+
+	// Process superclass, if any
+	if (sourceClass.getMetadata().hasSuperClass()) {
+		String superclass = sourceClass.getMetadata().getSuperClassName();
+		if (superclass != null && !superclass.startsWith("java") &&
+				!this.knownSuperclasses.containsKey(superclass)) {
+			this.knownSuperclasses.put(superclass, configClass);
+			// Superclass found, return its annotation metadata and recurse
+			return sourceClass.getSuperClass();
+		}
+	}
+
+	// No superclass -> processing is complete
+	return null;
+}先跳过一些方法，先看这段代码
+```
+
+看源码前，先解析下两个了类
+
+- ConfigurationClass
+  该类的是对类的一些配置信息的封装
+  ![image-20210315224001633](media/image-20210315224001633.png)
+- SourceClass
+  是对类的封装，就是把类和注解封装起来
+  ![image-20210315223402916](media/image-20210315223402916.png)
+
+从这两个类的定义看，`SourceClass`其实就是一个简单的封装，这个类的重点就是包含了`AnnotationMetadata`也就是注解元数据。而这个类在源码中创建时，source就是目标类的class对象。
+
+ConfigurationClass从属性上看，这个类也能表示某个类，因为它有beanName。但从其他属性看，更像是对一些信息的收集。
+
+回到`doProcessConfigurationClass`，我们按功能看
+
+##### 判断类上面是否有Component注解和递归处理有@Component注解的内部类
+
+![image-20210315222638736](media/image-20210315222638736.png)
+
+这段代码块就是判断类上面是否有Component注解和递归处理有@Component注解的内部类，看源码：
+
+```java
+private void processMemberClasses(ConfigurationClass configClass, SourceClass sourceClass,
+		Predicate<String> filter) throws IOException {
+
+	// 获取该类的内部类并又包装成sourceClass对象
+	Collection<SourceClass> memberClasses = sourceClass.getMemberClasses();
+	if (!memberClasses.isEmpty()) {
+		List<SourceClass> candidates = new ArrayList<>(memberClasses.size());
+		for (SourceClass memberClass : memberClasses) {
+			//如果类是候选的
+			if (ConfigurationClassUtils.isConfigurationCandidate(memberClass.getMetadata()) &&
+					!memberClass.getMetadata().getClassName().equals(configClass.getMetadata().getClassName())) {
+				candidates.add(memberClass);
+			}
+		}
+		//排序
+		OrderComparator.sort(candidates);
+		//循环去处理每一个内部类
+		for (SourceClass candidate : candidates) {
+			if (this.importStack.contains(configClass)) {
+				this.problemReporter.error(new CircularImportProblem(configClass, this.importStack));
+			}
+			else {
+				this.importStack.push(configClass);
+				try {
+					//candidate 子  configClass 父，candidate 是 configClass的内部类
+					processConfigurationClass(candidate.asConfigClass(configClass), filter);
+				}
+				finally {
+					this.importStack.pop();
+				}
+			}
+		}
+	}
+}
+```
+
+先通过
+
+```java
+Collection<SourceClass> memberClasses = sourceClass.getMemberClasses();
+```
+
+![image-20211204235547374](media/image-20211204235547374.png)
+
+获取了内部类，接着执行了![image-20210315224133162](media/image-20210315224133162.png)
+
+看哪些内部类有@Component、@PropertySource、@ComponentScan、@Bean、@Import、@ImportResource这些注解
+
+![image-20210315224219787](media/image-20210315224219787.png)
+
+排序完后，就进行遍历了。这个就是解析的入口方法，所以这是一个递归的过程了。
+
+继续看`doProcessConfigurationClass`
+
+##### 处理PropertySources和 PropertySource注解
+
+![image-20210315035624683](media/image-20210315035624683.png)
+
+```java
+private void processPropertySource(AnnotationAttributes propertySource) throws IOException {
+	String name = propertySource.getString("name");
+	if (!StringUtils.hasLength(name)) {
+		name = null;
+	}
+	String encoding = propertySource.getString("encoding");
+	if (!StringUtils.hasLength(encoding)) {
+		encoding = null;
+	}
+	//获取配置文件路径
+	String[] locations = propertySource.getStringArray("value");
+	Assert.isTrue(locations.length > 0, "At least one @PropertySource(value) location is required");
+	boolean ignoreResourceNotFound = propertySource.getBoolean("ignoreResourceNotFound");
+
+	Class<? extends PropertySourceFactory> factoryClass = propertySource.getClass("factory");
+	PropertySourceFactory factory = (factoryClass == PropertySourceFactory.class ?
+			DEFAULT_PROPERTY_SOURCE_FACTORY : BeanUtils.instantiateClass(factoryClass));
+
+	for (String location : locations) {
+		try {
+			//替换占位符
+			String resolvedLocation = this.environment.resolveRequiredPlaceholders(location);
+			//流的方式加载配置文件并封装成Resource对象
+			Resource resource = this.resourceLoader.getResource(resolvedLocation);
+			//加载Resource中的配置属性封装成Properties对象中，并创建PropertySource对象加入到Environment对象中
+			addPropertySource(factory.createPropertySource(name, new EncodedResource(resource, encoding)));
+		}
+    //去掉catch
+    ...
+	}
+}
+```
+
+通过执行了代码后
+
+```
+factory.createPropertySource(name, new EncodedResource(resource, encoding))
+```
+
+已经把配置信息封装成一个Map，并封装成一个PropertySource
+
+接着在代码中
+
+```
+addPropertySource(PropertySource<?> propertySource)
+```
+
+会把PropertySource添加到Environment中
+
+![image-20210315222223657](media/image-20210315222223657.png)
+
+##### 处理ComponentScans和ComponentScan注解
+
+![image-20210315224540471](media/image-20210315224540471.png)
+
+先通过上边的代码获取`ComponentScan`的集合。如果有就进入该代码块：
+
+![image-20210315224910213](media/image-20210315224910213.png)
+
+对前面的结合遍历，而在在for循环中有这样的一个方法:
+
+```
+Set<BeanDefinitionHolder> scannedBeanDefinitions = this.componentScanParser.parse(componentScan, sourceClass.getMetadata().getClassName());
+```
+
+`componentScanParser`指向的对象是`ComponentScanAnnotationParser`
+
+ComponentScanAnnotationParser#parse
+
+```java
+public Set<BeanDefinitionHolder> parse(AnnotationAttributes componentScan, final String declaringClass) {
+	ClassPathBeanDefinitionScanner scanner = new ClassPathBeanDefinitionScanner(this.registry,
+			componentScan.getBoolean("useDefaultFilters"), this.environment, this.resourceLoader);
+
+	Class<? extends BeanNameGenerator> generatorClass = componentScan.getClass("nameGenerator");
+	boolean useInheritedGenerator = (BeanNameGenerator.class == generatorClass);
+	scanner.setBeanNameGenerator(useInheritedGenerator ? this.beanNameGenerator :
+			BeanUtils.instantiateClass(generatorClass));
+
+	ScopedProxyMode scopedProxyMode = componentScan.getEnum("scopedProxy");
+	if (scopedProxyMode != ScopedProxyMode.DEFAULT) {
+		scanner.setScopedProxyMode(scopedProxyMode);
+	}
+	else {
+		Class<? extends ScopeMetadataResolver> resolverClass = componentScan.getClass("scopeResolver");
+		scanner.setScopeMetadataResolver(BeanUtils.instantiateClass(resolverClass));
+	}
+
+	scanner.setResourcePattern(componentScan.getString("resourcePattern"));
+
+	for (AnnotationAttributes filter : componentScan.getAnnotationArray("includeFilters")) {
+		for (TypeFilter typeFilter : typeFiltersFor(filter)) {
+			scanner.addIncludeFilter(typeFilter);
+		}
+	}
+	for (AnnotationAttributes filter : componentScan.getAnnotationArray("excludeFilters")) {
+		for (TypeFilter typeFilter : typeFiltersFor(filter)) {
+			scanner.addExcludeFilter(typeFilter);
+		}
+	}
+
+	boolean lazyInit = componentScan.getBoolean("lazyInit");
+	if (lazyInit) {
+		scanner.getBeanDefinitionDefaults().setLazyInit(true);
+	}
+
+	Set<String> basePackages = new LinkedHashSet<>();
+	String[] basePackagesArray = componentScan.getStringArray("basePackages");
+	for (String pkg : basePackagesArray) {
+		String[] tokenized = StringUtils.tokenizeToStringArray(this.environment.resolvePlaceholders(pkg),
+				ConfigurableApplicationContext.CONFIG_LOCATION_DELIMITERS);
+		Collections.addAll(basePackages, tokenized);
+	}
+	for (Class<?> clazz : componentScan.getClassArray("basePackageClasses")) {
+		basePackages.add(ClassUtils.getPackageName(clazz));
+	}
+	if (basePackages.isEmpty()) {
+		basePackages.add(ClassUtils.getPackageName(declaringClass));
+	}
+
+	scanner.addExcludeFilter(new AbstractTypeHierarchyTraversingFilter(false, false) {
+		@Override
+		protected boolean matchClassName(String className) {
+			return declaringClass.equals(className);
+		}
+	});
+	return scanner.doScan(StringUtils.toStringArray(basePackages));
+}
+```
+
+第一行就`new ClassPathBeanDefinitionScanner`了，这个`ClassPathBeanDefinitionScanner`就是负责包扫描的。
+
+后面的代码其他都是向ClassPathBeanDefinitionScanner中填充注解属性
+
+最后：
+
+![image-20210315225603864](media/image-20210315225603864.png)
+
+这个方法的详情看[01-Spring中BeanDefinition的创建和注册](./01-Spring中BeanDefinition的创建和注册)
+
+扫描完后返回了一个BeanDefinition集合，接着又有一个for
+
+![image-20210315230555900](media/image-20210315230555900.png)
+
+因为通过scaner扫描出来的只是有@Component注解类，类上还可能有其他注解，所以对于这种情况，如果有对应注解，这里通过循环调用parse，又把流程走一遍
+
+##### 处理@Import注解
+
+接着代码走到这
+
+![image-20210315231038450](media/image-20210315231038450.png)
+
+先通过`getImports(sourceClass)`拿到类上的@Import的值和类上其他注解中@Import的的值，返回一个SourceClass集合。
+
+![image-20210504215633597](media/image-20210504215633597.png)
+
+![image-20210504215643071](media/image-20210504215643071.png)
+
+接着看processImports的核心代码段
+
+```java
+//如果没有@Import注解直接返回，不处理
+if (importCandidates.isEmpty()) {
+	return;
+}
+
+//循环类上面的每一个@Import
+for (SourceClass candidate : importCandidates) {
+   //如果Import进来的是一个ImportSelector类型
+   if (candidate.isAssignable(ImportSelector.class)) {
+      // Candidate class is an ImportSelector -> delegate to it to determine imports
+      Class<?> candidateClass = candidate.loadClass();
+      //反射实例化
+      ImportSelector selector = ParserStrategyUtils.instantiateClass(candidateClass, ImportSelector.class,
+            this.environment, this.resourceLoader, this.registry);
+      Predicate<String> selectorFilter = selector.getExclusionFilter();
+      if (selectorFilter != null) {
+         exclusionFilter = exclusionFilter.or(selectorFilter);
+      }
+      //如果是一个DeferredImportSelector类型
+      if (selector instanceof DeferredImportSelector) {
+         //比较复杂，springboot中自动配置用到了
+         this.deferredImportSelectorHandler.handle(configClass, (DeferredImportSelector) selector);
+      }
+      else {
+         //在这里调用selectImports方法，返回所有的需要import到spring容器的beanName
+         String[] importClassNames = selector.selectImports(currentSourceClass.getMetadata());
+         Collection<SourceClass> importSourceClasses = asSourceClasses(importClassNames, exclusionFilter);
+         //递归处理，有可能import进来的类又有@Import注解
+         processImports(configClass, currentSourceClass, importSourceClasses, exclusionFilter, false);
+      }
+   }
+   //如果Import进来的是一个ImportBeanDefinitionRegistrar类型
+   else if (candidate.isAssignable(ImportBeanDefinitionRegistrar.class)) {
+      // Candidate class is an ImportBeanDefinitionRegistrar ->
+      // delegate to it to register additional bean definitions
+      Class<?> candidateClass = candidate.loadClass();
+      //反射实例化
+      ImportBeanDefinitionRegistrar registrar =
+            ParserStrategyUtils.instantiateClass(candidateClass, ImportBeanDefinitionRegistrar.class,
+                  this.environment, this.resourceLoader, this.registry);
+      //加入到importBeanDefinitionRegistrars容器中，这里还没有调用registerBeanDefinitions
+      configClass.addImportBeanDefinitionRegistrar(registrar, currentSourceClass.getMetadata());
+   }
+   else {
+      // Candidate class not an ImportSelector or ImportBeanDefinitionRegistrar ->
+      // process it as an @Configuration class
+      this.importStack.registerImport(
+            currentSourceClass.getMetadata(), candidate.getMetadata().getClassName());
+      //如果都不是，则走这里
+      processConfigurationClass(candidate.asConfigClass(configClass), exclusionFilter);
+   }
+}
+```
+
+> `importCandidates`就是@Import中值。
+
+从源码可知如果Import进来的是一个ImportSelector类型、DeferredImportSelector类型、ImportBeanDefinitionRegistrar类型的，都会在该方法中执行对应的逻辑，而如不是上边的类型，就会执行`processConfigurationClass(candidate.asConfigClass(configClass), exclusionFilter)`也就是递归的处理引入类的注解信息，这里有一点要注意，`candidate.asConfigClass(configClass)`candidate为被引入的类，configClass为有@Import的类，通过`asConfigClass`后，会把configClass添加到ConfigurationClass.importedBy集合中，这种表示该类是被某个类@Import进来的。
+
+回到源码。
+
+第一段代码就是如果没有@Import注解直接返回，不处理，有的话才会执行下面流程。假如有Import注解
+
+看for的代码块，就是遍历@Import注解上的类，先看第一个if条件。
+
+![image-20210315233538442](media/image-20210315233538442.png)
+
+可以看到， 先实例话了对象，然后根据实现的接口走不同的逻辑。
+
+如果实现了`ImportSelector`接口，就会先去创建对象，然后会看这个对象是否实现了`DeferredImportSelector`接口，如果没有实现，就会直接调用`ImportSelector的selectImports`方法，从源码可知，该方法的入参为有@Import注解的类。
+
+![image-20210315233849008](media/image-20210315233849008.png)
+
+执行完`ImportSelector`接口方法后，接口返回了一个类的全限定名数组，接着根据这个数组生成`Collection<SourceClass>`
+
+```
+Collection<SourceClass> importSourceClasses = asSourceClasses(importClassNames, exclusionFilter);
+```
+
+最后，返回的类（`Collection<SourceClass>`）又有可能有Import注解，所以又调用了`processImports`递归的处理。
+
+如果实现了`DeferredImportSelector`接口
+
+![image-20210316000706719](media/image-20210316000706719.png)
+
+就只是包装成`DeferredImportSelectorHolder`，然后放入到集合中
+
+![image-20210316020231656](media/image-20210316020231656.png)
+
+执行时机后边讲
+
+接着看else if代码块:
+
+![image-20210316001738852](media/image-20210316001738852.png)
+
+如是实现的是mportBeanDefinitionRegistrars接口，先实例化，然后执行
+
+```java
+configClass.addImportBeanDefinitionRegistrar(registrar, currentSourceClass.getMetadata());
+
+public void addImportBeanDefinitionRegistrar(ImportBeanDefinitionRegistrar registrar, AnnotationMetadata importingClassMetadata) {
+	this.importBeanDefinitionRegistrars.put(registrar, importingClassMetadata);
+}
+```
+
+添加到configClass（ConfigurationClass）的importBeanDefinitionRegistrars容器中。
+
+这个接口的作用相当于BeanDefinitionRegistryPostProcessor#postProcessBeanDefinitionRegistry方法，只是调用的时机不同，比如实现这样一个功能
+
+```java
+public class JamesImportBeanDefinitionRegistrar implements ImportBeanDefinitionRegistrar {
+    @Override
+    public void registerBeanDefinitions(AnnotationMetadata importingClassMetadata, BeanDefinitionRegistry registry) {
+        //自己创建beanDefinition对象，然后注册到BeanDefinitionRegistry中
+        GenericBeanDefinition genericBeanDefinition = new GenericBeanDefinition();
+        genericBeanDefinition.setBeanClass(BeanDefinitionBean.class);
+        MutablePropertyValues propertyValues = genericBeanDefinition.getPropertyValues();
+        propertyValues.add("name","Jack");
+        registry.registerBeanDefinition("beanDefinitionBean",genericBeanDefinition);
+    }
+}
+```
+
+执行时机先不说
+
+如果上面的接口都没有，情况下走到else了：
+
+![image-20210316002950034](media/image-20210316002950034.png)
+
+candidate.asConfigClass(configClass)，这个方法的参数要搞清楚，configClass是有@Import注解的类，而candidate是被引入的类，这段代码的意思就是，把configClass添加到candidate的ConfigurationClass.importedBy集合中。这样，就能知道某个类是被谁impor的了。
+
+接着调用了`processConfigurationClass`，因为被引入进来的类可能还有别的注解，所以流程又从头开始。
+
+这个方法不像上边的Scan方法，这个方法中还没涉及BeanDefinition的创建，也没有注册，但会实例化对象，这点看上去有点迷惑，但如果看回入口方法[`ConfigurationClassParser#processConfigurationClass`](#ConfigurationClassParser#processConfigurationClass)，在最后会把ConfigurationClass放入到一个Map中。从这点上看ConfigurationClass可以看做是BeanDefinition信息的载体。先看到这，等把下面的流程看完了， 再回到入口方法。
+
+##### 处理@ImportResource注解
+
+代码执行到这里了![image-20210316030805681](media/image-20210316030805681.png)
+
+再这里处理ImportResource注解。代码也很简单，只是在向ConfigurationClass的importedResources集合放入对应关系，也就是，这里和上边的一样，不会去实际处理。只是做了信息的收集。
+
+##### 处理@Bean注解
+
+![image-20210316031211451](media/image-20210316031211451.png)
+
+```
+retrieveBeanMethodMetadata(sourceClass)
+```
+
+这段代码的意思就是返回有@Bean的方法，并且把该方法封装成`MethodMetadata`，然后放入到ConfigurationClass的beanMethods集合中。还是做了信息的收集
+
+重点的代码已经看完了，看回入口方法
+
+### 再看ConfigurationClassParser#processConfigurationClass
+
+```java
+SourceClass sourceClass = asSourceClass(configClass, filter);
+do {
+	//核心代码，认真读
+	sourceClass = doProcessConfigurationClass(configClass, sourceClass, filter);
+}
+while (sourceClass != null);
+
+this.configurationClasses.put(configClass, configClass);
+```
+
+经过了doProcessConfigurationClass方法后，除了扫描的其他都是对注解信息的收集，并把信息放到了对应的ConfigurationClass类中，最后把ConfigurationClass放入了configurationClasses这个Map集合中。这个方法的逻辑就结束了。
+
+也就是说`configurationClasses`这个集合是用来保存已经完成信息收集的ConfigurationClass类。
+
+### DeferredImportSelector类型的类的处理时机和作用
+
+[DeferredImportSelector接口的作用、初始化和执行原理](../00-DeferredImportSelector接口的作用、初始化和执行原理)
+
+### 再看ConfigurationClassPostProcessor#processConfigBeanDefinitions
+
+[完整代码](#ConfigurationClassPostProcessor#processConfigBeanDefinitions)
+
+![image-20210316032219843](media/image-20210316032219843.png)
+
+上边的代码只是执行了parse方法，并把收集完信息的ConfigrationClass放入了`ConfigurationClassParser#configurationClasses`这个集合中，那下边剩下的逻辑就是处理这个集合中的configurationClasses了，看代码
+
+![image-20210316032536693](media/image-20210316032536693.png)
+
+继续跟踪代码到这里
+
+![image-20210316032601078](media/image-20210316032601078.png)
+
+### BeanDefinition的创建——ConfigurationClassBeanDefinitionReader#loadBeanDefinitions
+
+> 在其实已经有BeanDefinition的创建的创建了，就是@Component注解扫描。在这扫描其实已经把绝大部分的类的BeanDefinition都创建了。而到了loadBeanDefinitions这一步就是为剩余的类生成BeanDefinition。这些剩余类有
+>
+> 1. 通过applicationContext.register()这样注册的
+> 2. @Import进来的类，这里设计到的
+> 3. @Bean注解
+> 4. 引入进来的xml文件的解析流程
+> 5. ImportBeanDefinitionRegistrar
+
+```java
+//ConfigurationClassBeanDefinitionReader
+public void loadBeanDefinitions(Set<ConfigurationClass> configurationModel) {
+	TrackedConditionEvaluator trackedConditionEvaluator = new TrackedConditionEvaluator();
+	for (ConfigurationClass configClass : configurationModel) {
+		loadBeanDefinitionsForConfigurationClass(configClass, trackedConditionEvaluator);
+	}
+}
+
+private void loadBeanDefinitionsForConfigurationClass(
+		ConfigurationClass configClass, TrackedConditionEvaluator trackedConditionEvaluator) {
+
+	//是否要跳过
+  // 判断哪些被@Improt引入的类中是有用@Contitional注解，有就执行方法判断条件是否通过
+	if (trackedConditionEvaluator.shouldSkip(configClass)) {
+		String beanName = configClass.getBeanName();
+		if (StringUtils.hasLength(beanName) && this.registry.containsBeanDefinition(beanName)) {
+			this.registry.removeBeanDefinition(beanName);
+		}
+		this.importRegistry.removeImportingClass(configClass.getMetadata().getClassName());
+		return;
+	}
+
+	//@Import进来的类，和内部类走这里变成BeanDefinition，并注册
+	if (configClass.isImported()) {
+		registerBeanDefinitionForImportedConfigurationClass(configClass);
+	}
+	//@Bean注解的方法变成BeanDefinition，并注册
+	for (BeanMethod beanMethod : configClass.getBeanMethods()) {
+		loadBeanDefinitionsForBeanMethod(beanMethod);
+	}
+
+	//走xml解析流程
+	loadBeanDefinitionsFromImportedResources(configClass.getImportedResources());
+	//调用ImportBeanDefinitionRegistrar的方法
+	loadBeanDefinitionsFromRegistrars(configClass.getImportBeanDefinitionRegistrars());
+}
+```
+
+#### 根据@Conditional来判断
+
+按功能看代码
+
+![image-20210316032942948](media/image-20210316032942948.png)
+
+这里又是根据@Conditional来判断条件是否符合
+
+#### @Import进来的类
+
+![image-20210316033045850](media/image-20210316033045850.png)
+
+先执行了`configClass.isImported())`看源码：
+
+```
+public boolean isImported() {
+	return !this.importedBy.isEmpty();
+}
+```
+
+也就是，这个if是去判断这个类是否被@Import注解引入的。
+
+```java
+// ConfigurationClassBeanDefinitionReader
+private void registerBeanDefinitionForImportedConfigurationClass(ConfigurationClass configClass) {
+	AnnotationMetadata metadata = configClass.getMetadata();
+	AnnotatedGenericBeanDefinition configBeanDef = new AnnotatedGenericBeanDefinition(metadata);
+
+	ScopeMetadata scopeMetadata = scopeMetadataResolver.resolveScopeMetadata(configBeanDef);
+	configBeanDef.setScope(scopeMetadata.getScopeName());
+	String configBeanName = this.importBeanNameGenerator.generateBeanName(configBeanDef, this.registry);
+	AnnotationConfigUtils.processCommonDefinitionAnnotations(configBeanDef, metadata);
+
+	BeanDefinitionHolder definitionHolder = new BeanDefinitionHolder(configBeanDef, configBeanName);
+	definitionHolder = AnnotationConfigUtils.applyScopedProxyMode(scopeMetadata, definitionHolder, this.registry);
+	this.registry.registerBeanDefinition(definitionHolder.getBeanName(), definitionHolder.getBeanDefinition());
+	configClass.setBeanName(configBeanName);
+
+	if (logger.isTraceEnabled()) {
+		logger.trace("Registered bean definition for imported class '" + configBeanName + "'");
+	}
+}
+```
+
+生成一个AnnotatedGenericBeanDefinition对象了，并且执行`registry.registerBeanDefinition`去注册BeanDefinition
+
+#### @Bean注解
+
+接着看代码
+
+![image-20210316033717098](media/image-20210316033717098.png)
+
+ConfigurationClass中的BeanMethods集合放的是有@Bean的方法的封装，所以这个for就是把@Bean的方法，变成BeanDefinition，看源码到这里
+
+![image-20210316034741889](media/image-20210316034741889.png)
+
+这时存在这样的关系
+
+![image-20210316034835183](media/image-20210316034835183.png)
+
+这个是真的和factoryMethod一样了。
+
+经过上面的步骤后，被@Import引入的类和有@Bean修饰的方法，都已经变成一个BeanDefinition了，剩下的看下面
+
+#### xml解析
+
+![image-20210316040835203](media/image-20210316040835203.png)
+
+这个步骤就看这里——[Spring中BeanDefinition的创建和注册](./01-Spring中BeanDefinition的创建和注册)BeanDefinition已经都生成并注册完了，看最后的一段代码
+
+#### ImportBeanDefinitionRegistrar的方法
+
+![image-20210316041014447](media/image-20210316041014447.png)
+
+在对@Impor的解析的时候，如果引入的类实现了接口`ImportBeanDefinitionRegistrar`接口，就实例化一个对象并放入了ConfigrationClass的importBeanDefinitionRegistrars中，而这段代码就是拿到这个集合，并调用对象的`registerBeanDefinitions`方法。
+
+![image-20210316041227621](media/image-20210316041227621.png)
+
+看到这，还记得一个接口BeanDefinitionRegistryPostProcesso这个接口吗，ImportBeanDefinitionRegistrar接口的作用和`BeanDefinitionRegistryPostProcesso`是一样的。但是执行的时机不同。`BeanDefinitionRegistryPostProcesso`接口的的postProcessBeanDefinitionRegistry这个方法BeanFactory创建完成后调用的，可以对BeanDefinition做任何操作。可以看[BeanDefinitionRegistryPostProcessor调用时机](./02-Spinrg的后置处理器-BeanDefinitionRegistryPostProcessor调用时机)可以知道，实现PriorityOrdered接口的是最先执行的，而ConfigurationClassPostProcessor实现了这个接口，但该类的getOrder()返回的是最低的优先级。
+
+也就是说，从执行的顺序看
+
+1. 实现了BeanDefinitionRegistryPostProcessor和PriorityOrdered的先执行
+3. ConfigurationClassPostProcessor执行
+4. 在ConfigurationClassPostProcessor执行的最后执行ImportBeanDefinitionRegistrar
+4. 执行实现了BeanDefinitionRegistryPostProcessor和Ordered的
+5. 执行只实现了BeanDefinitionRegistryPostProcessor
+
+所以，`ImportBeanDefinitionRegistrar`接口的调用是发生在ConfigurationClassPostProcessor中，所以对于某些有先后关系的Beandefinition，这时就需要考虑优先级的问题。
+
+## ConfigurationClassParser#parse总结
+
+parser.parse(candidates)
+
+先解析@Configuration、@PropertySources、@PropertySource、@ComponentScan、@Bean、@Import、@ImportResource。在解析@ComponentScan的时候就已经把BeanDefinition创建并且注册了，而在解析@Import的时候会调用ImportSelector接口的方法，其他的注解都只是做一个信息收集的过程。收集完注解的信息后，会把这些信息的封装对象`ConfigurationClass`放到一个收集完成集合中，根据之前收集的信息（ConfigurationClass）去创建并注册BeanDefinition，并且最后调用`ImportBeanDefinitionRegistrar`接口的方法。
+
+## @Configuration和@Component的问题
+
+从源码可以知道，使用@Component都能触发内部注解的解析，但为什么还要用@Configuration这个注解呢？
+
+比如这种情况
+
+![image-20210316043645851](media/image-20210316043645851.png)
+
+在使用@Component的时候，根据之前的Bean的[初始化阶段factoryMethod的源码](./04-Spring的Bean实例化)我们都知道，这种情况lison()会被调用了两次。也就是说，会产生两个Lison对象。
+
+还有一种情况
+
+```java
+public class LiLi implements FactoryBean {
+    @Override
+    public Object getObject() throws Exception {
+        return new Docker();
+    }
+
+    @Override
+    public Class<?> getObjectType() {
+        return Docker.class;
+    }
+
+    public void xae() {
+        System.out.println("xae");
+    }
+}
+
+```
+
+![image-20210316044549349](media/image-20210316044549349.png)
+
+也是使用了@Component，我通过applicationContext.getBean(Docker.class)获取的对象和通过`lisonFactory()`方法调用lili的getObject获取的对象是两个不同的对象。其实这样想，在lisonFactory()中就相当于获取了Lili中个工厂类，然后工程类在new一个。
+
+上面两种情况都破坏了Spring的单例。
+
+但是上面两种情况只要把@Component注解换成@Configuration注解，那么这时调用的都是获取同一个对象。@Configuration注解就是保证单例的。其实就是调用liLi方法时走的是代理对象的方法，代理对象会从缓存中拿值。
+
+怎么实现的，看回源码
+
+上面都是讲了`ConfigurationClassPostProcessor`的`postProcessBeanDefinitionRegistry`方法。用来生成并注册BeanDefinition。在处理完个方法后，还会执行一个方法，就是`postProcessBeanFactory`。现在看
+
+`ConfigurationClassPostProcessor#postProcessBeanFactory`方法。
+
+#### `ConfigurationClassPostProcessor#postProcessBeanFactory`
+
+![image-20210316050724031](media/image-20210316050724031.png)
+
+说代码前，先看下[cglib的api](./CGLIB)
+
+```java
+	public void enhanceConfigurationClasses(ConfigurableListableBeanFactory beanFactory) {
+		Map<String, AbstractBeanDefinition> configBeanDefs = new LinkedHashMap<>();
+		for (String beanName : beanFactory.getBeanDefinitionNames()) {
+			BeanDefinition beanDef = beanFactory.getBeanDefinition(beanName);
+			Object configClassAttr = beanDef.getAttribute(ConfigurationClassUtils.CONFIGURATION_CLASS_ATTRIBUTE);
+			MethodMetadata methodMetadata = null;
+			if (beanDef instanceof AnnotatedBeanDefinition) {
+				methodMetadata = ((AnnotatedBeanDefinition) beanDef).getFactoryMethodMetadata();
+			}
+			if ((configClassAttr != null || methodMetadata != null) && beanDef instanceof AbstractBeanDefinition) {
+				// Configuration class (full or lite) or a configuration-derived @Bean method
+				// -> resolve bean class at this point...
+				AbstractBeanDefinition abd = (AbstractBeanDefinition) beanDef;
+				if (!abd.hasBeanClass()) {
+					try {
+						abd.resolveBeanClass(this.beanClassLoader);
+					}
+					catch (Throwable ex) {
+						throw new IllegalStateException(
+								"Cannot load configuration class: " + beanDef.getBeanClassName(), ex);
+					}
+				}
+			}
+			if (ConfigurationClassUtils.CONFIGURATION_CLASS_FULL.equals(configClassAttr)) {
+        //打印日志
+				.....
+				configBeanDefs.put(beanName, (AbstractBeanDefinition) beanDef);
+			}
+		}
+		if (configBeanDefs.isEmpty()) {
+			// nothing to enhance -> return immediately
+			return;
+		}
+
+		ConfigurationClassEnhancer enhancer = new ConfigurationClassEnhancer();
+		for (Map.Entry<String, AbstractBeanDefinition> entry : configBeanDefs.entrySet()) {
+			AbstractBeanDefinition beanDef = entry.getValue();
+			// If a @Configuration class gets proxied, always proxy the target class
+			beanDef.setAttribute(AutoProxyUtils.PRESERVE_TARGET_CLASS_ATTRIBUTE, Boolean.TRUE);
+			// Set enhanced subclass of the user-specified bean class
+			Class<?> configClass = beanDef.getBeanClass();
+			Class<?> enhancedClass = enhancer.enhance(configClass, this.beanClassLoader);
+			if (configClass != enhancedClass) {
+				if (logger.isTraceEnabled()) {
+					//打印日志
+					.....
+				}
+				beanDef.setBeanClass(enhancedClass);
+			}
+		}
+	}
+```
+
+![image-20210316051841088](media/image-20210316051841088.png)
+
+在之前的代码中，检查到有@Configuration、@Componet等注解的时候会为BeanDefi`nition打一个标记，现在在这里取出这个标记。
+
+往下走到这
+![image-20210316052019314](media/image-20210316052019314.png)
+
+在前面已经讲过了@Configuration，把属性值设置为`CONFIGURATION_CLASS_FULL=full`，而这块代码也很简单，就是放入到configBeanDefs容器中。这时往下走到这段代码，就是对`configBeanDefs`集合的调用
+
+![image-20211205012910537](media/image-20211205012910537.png)
+
+在这个for循环中，生成了一个`ConfigurationClassEnhancer`，然后循环的
+
+![image-20210316052233106](media/image-20210316052233106.png)
+
+也就是说，如果有@Configuration这个注解，就把需要生成代理标记设置到`beanDefinition`的属性中。并把代理对象的class设置到BeanDefinition中。现在看下：
+
+`ConfigurationClassEnhancer#enhance`
+
+![image-20210316052531879](media/image-20210316052531879.png)
+
+```java
+private Enhancer newEnhancer(Class<?> configSuperClass, @Nullable ClassLoader classLoader) {
+	Enhancer enhancer = new Enhancer();
+	enhancer.setSuperclass(configSuperClass);
+	enhancer.setInterfaces(new Class<?>[] {EnhancedConfiguration.class});
+	enhancer.setUseFactory(false);
+	enhancer.setNamingPolicy(SpringNamingPolicy.INSTANCE);
+	enhancer.setStrategy(new BeanFactoryAwareGeneratorStrategy(classLoader));
+	enhancer.setCallbackFilter(CALLBACK_FILTER);
+	enhancer.setCallbackTypes(CALLBACK_FILTER.getCallbackTypes());
+	return enhancer;
+}
+```
+
+也就是说在根据BeanDefinition生成bean的过程中会生成一个代理对象，该代理对象继承了目标类
+
+定义的Callback![image-20210316052624271](media/image-20210316052624271.png)
+
+可以看下
+
+![image-20210316052857049](media/image-20210316052857049.png)
+
+从[cglib的api](./CGLIB)可知，代理对象的方法调用都会被CallbackFilter拦截，看上面的ConditionalCallbackFilter
+
+```java
+private static class ConditionalCallbackFilter implements CallbackFilter {
+
+	private final Callback[] callbacks;
+
+	private final Class<?>[] callbackTypes;
+
+	public ConditionalCallbackFilter(Callback[] callbacks) {
+		this.callbacks = callbacks;
+		this.callbackTypes = new Class<?>[callbacks.length];
+		for (int i = 0; i < callbacks.length; i++) {
+			this.callbackTypes[i] = callbacks[i].getClass();
+		}
+	}
+
+	@Override
+	public int accept(Method method) {
+		for (int i = 0; i < this.callbacks.length; i++) {
+			Callback callback = this.callbacks[i];
+			if (!(callback instanceof ConditionalCallback) || ((ConditionalCallback) callback).isMatch(method)) {
+				return i;
+			}
+		}
+		throw new IllegalStateException("No callback available for method " + method.getName());
+	}
+
+	public Class<?>[] getCallbackTypes() {
+		return this.callbackTypes;
+	}
+}
+```
+
+在accept中，看哪个匹配就执行那个，我们现在关注的是@Bean注解，所以去isMatch中找吧，找到了BeanMethodInterceptor的isMatch匹配
+
+![image-20210316053802196](media/image-20210316053802196.png)
+
+![image-20210316053810740](media/image-20210316053810740.png)
+
+也就是说调用的方法会进入到`BeanMethodInterceptor`的intercept方法中。看源码
+
+![image-20210505003246605](media/image-20210505003246605.png)
+
+![image-20210316054223669](media/image-20210316054223669.png)
+
+![image-20210316054233204](media/image-20210316054233204.png)
+
+这个有印象吗？就是在Spring bean的初始化时，对于@Bean、factoryMetoh这种通过调用方法来实例化的时候，Spring调用SimpleInstantiationStrategy.instantiate的源码：
+
+![image-20210316054518792](media/image-20210316054518792.png)
+
+在初始化阶段，这里先把有@Bean的方法对象放入到`currentlyInvokedFactoryMethod`这个threadLocal中，然后用反射调用方法，由于`factoryBean`这个是代理对象，所以这里的方法调用实际上就走到了这里：
+![image-20210316054210317](media/image-20210316054210317.png)
+
+也就是说，在Spring调用方法的时候实际上也是一个代理对象，这个时候由于这个ThreadLocal有值，所以Spring调用的时候会进去了if的代码块，通过调用被代理对象调用方法来生成对象。这是在spring的ioc初始化阶段走的逻辑。如果初始化阶段结束了，在程序运行节点调用有@bean的方法的时候，回到`BeanMethodInterceptor`的intercept方法，继续走
+
+![image-20210316054817401](media/image-20210316054817401.png)
+
+进去resolveBeanReference后继续走
+
+![image-20210316055213435](media/image-20210316055213435.png)
+
+![image-20210316055234046](media/image-20210316055234046.png)
+
+走到这里意味着已经初始化完成了，所以通过beanFactory.getBean就是从一级缓存singletonObjects这个Map中拿数据了。接着代码继续走，由于Spring在调用代理方法的时候都会往一个TreadLocal中设置值，调用完后就移除了，走到这段代码时
+
+![image-20210316055509245](media/image-20210316055509245.png)
+
+会放回null，所以这时我们通过缓存获取的对象就直接返回了。所以在上边的两种情况下，调用了一个@Bean的方法，那就相当于从一级缓存中拿到数据了。而对于FactoryBean
+
+![image-20210316055655209](media/image-20210316055655209.png)
+
+LiLi 这时是一个FactoryBean类型对象，但由于这个对象是cglib的代理对象，所以当调用object.getObject时，代理对象通过getBean在一级缓存singletonObjects中拿到FactoryBean类型对象，然后在返回前调用调用`getObjectForBeanInstance`，这个方法在讲实例化的最后——FactoryBean类型实例化就说过了，作用就是从`factoryBeanObjectCache`中拿目标对象。
