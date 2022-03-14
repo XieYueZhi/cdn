@@ -1,0 +1,1290 @@
+# 01Spring中BeanDefinition的创建和注册
+
+以ClassPathXmlApplicationContext为ApplicationContext
+
+```
+方法重要程度：
+ 0：不重要，可以不看
+ 1：一般重要，可看可不看
+ 5：非常重要，一定要看 必须读的 ：重要程度 5
+```
+
+```java
+	public ClassPathXmlApplicationContext(
+			String[] configLocations, boolean refresh, @Nullable ApplicationContext parent)
+			throws BeansException {
+
+		super(parent);
+		setConfigLocations(configLocations);
+		if (refresh) {
+			refresh();
+		}
+	}
+```
+
+refresh()方法是重要方法，ClassPathXmlApplicationContext没有重写该方法所以用的是从父类`AbstractApplicationContext`继承过来的`refresh()`，
+
+该方法是spring容器启动的核心方法，该类是一个典型的父类模板设计模式的运用，提供一个钩子方法，通过继承，子类实现对应的钩子方法来完成不同的功能。
+
+根据不同的上下文对象，会调用不同的上下文对象子类方法中
+
+核心上下文子类有：
+
+- ClassPathXmlApplicationContext
+- FileSystemXmlApplicationContext
+- AnnotationConfigApplicationContext
+- AnnotationConfigWebApplicationContext
+- EmbeddedWebApplicationContext(springboot)
+- ....
+
+这里关注的重点只有两个ClassPathXmlApplicationContext和AnnotationConfigApplicationContext。先看第一`ClassPathXmlApplicationContext`。ClassPathXmlApplicationContext的类图：
+
+![image-20210311213656659](media/image-20210311213656659.png)
+
+看回refresh()方法
+
+```java
+	@Override
+	public void refresh() throws BeansException, IllegalStateException {
+		synchronized (this.startupShutdownMonitor) {
+			//为容器初始化做准备，重要程度：0
+			// Prepare this context for refreshing.
+			prepareRefresh();
+
+			/*
+			*  重要程度：5
+			* */
+			// Tell the subclass to refresh the internal bean factory.
+			ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+
+			/*
+			 * 给beanFactory设置一些属性值，可以不看
+			 * */
+			// Prepare the bean factory for use in this context.
+			prepareBeanFactory(beanFactory);
+
+			try {
+				// Allows post-processing of the bean factory in context subclasses.
+				postProcessBeanFactory(beanFactory);
+
+				/*
+				 * BeanDefinitionRegistryPostProcessor
+				 * BeanFactoryPostProcessor
+				 * 完成对这两个接口的调用
+				 * */
+				// Invoke factory processors registered as beans in the context.
+				invokeBeanFactoryPostProcessors(beanFactory);
+
+				/*
+				 * 把实现了BeanPostProcessor接口的类实例化，并且加入到BeanFactory中
+				 * */
+				// Register bean processors that intercept bean creation.
+				registerBeanPostProcessors(beanFactory);
+
+				/*
+				 * 国际化,重要程度2
+				 * */
+				// Initialize message source for this context.
+				initMessageSource();
+
+				//初始化事件管理类
+				// Initialize event multicaster for this context.
+				initApplicationEventMulticaster();
+
+				//这个方法着重理解模板设计模式，因为在springboot中，这个方法是用来做内嵌tomcat启动的
+				// Initialize other special beans in specific context subclasses.
+				onRefresh();
+
+				/*
+				 * 往事件管理类中注册事件类
+				 * */
+				// Check for listener beans and register them.
+				registerListeners();
+
+				/*
+				 * 这个方法是spring中最重要的方法，没有之一
+				 * 所以这个方法一定要理解要具体看
+				 * 1、bean实例化过程
+				 * 2、ioc
+				 * 3、注解支持
+				 * 4、BeanPostProcessor的执行
+				 * 5、Aop的入口
+				 * */
+				// Instantiate all remaining (non-lazy-init) singletons.
+				finishBeanFactoryInitialization(beanFactory);
+
+				// Last step: publish corresponding event.
+				finishRefresh();
+			}
+
+			catch (BeansException ex) {
+				if (logger.isWarnEnabled()) {
+					logger.warn("Exception encountered during context initialization - " +
+							"cancelling refresh attempt: " + ex);
+				}
+
+				// Destroy already created singletons to avoid dangling resources.
+				destroyBeans();
+
+				// Reset 'active' flag.
+				cancelRefresh(ex);
+
+				// Propagate exception to caller.
+				throw ex;
+			}
+
+			finally {
+				// Reset common introspection caches in Spring's core, since we
+				// might not ever need metadata for singleton beans anymore...
+				resetCommonCaches();
+			}
+		}
+	}
+```
+
+首先refresh()方法是AbstractApplicationContext的核心，从上面源码看到，该方法里面定义的Spring整个初始化阶段的操作。而且提供一些钩子方法，让不同的类去重写钩子方法，实现不同的功能。该方法是线程安全的，不过该方法也就掉用哥一次，没谁调用多次 吧。
+
+这一节看
+
+```
+ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+```
+
+对于`ClassPathXmlApplicationContext`这个方法的作用：
+
+1. 创建BeanFactory对象
+
+2. xml解析
+
+   传统标签解析：bean、import等
+   自定义标签解析 如：<context:component-scan base-package="com.xiangxue.jack"/>
+   自定义标签解析流程：
+   		a、根据当前解析标签的头信息找到对应的namespaceUri
+   		b、加载spring所有jar中的spring.handlers文件。并建立映射关系
+   		c、根据namespaceUri从映射关系中找到对应的实现了NamespaceHandler接口的类
+   		d、调用类的init方法，init方法是注册了各种自定义标签的解析类
+   		e、根据namespaceUri找到对应的解析类，然后调用paser方法完成标签解析
+
+3. 把解析出来的xml标签封装成BeanDefinition对象
+
+开始看源码，该方法是在AbstractApplicationContext中的，
+
+```java
+protected ConfigurableListableBeanFactory obtainFreshBeanFactory() {
+	//核心方法，必须读，重要程度：5
+	refreshBeanFactory();
+	return getBeanFactory();
+}
+```
+
+refreshBeanFactory()方法是一个抽象的钩子方法，它的实现是交由子类来完成的，
+
+`AbstractRefreshableApplicationContext#refreshBeanFactory`：
+
+```java
+protected final void refreshBeanFactory() throws BeansException {
+	//如果BeanFactory不为空，则清除BeanFactory和里面的实例
+	if (hasBeanFactory()) {
+		destroyBeans();
+		closeBeanFactory();
+	}
+	try {
+		//BeanFactory 实例工厂
+		DefaultListableBeanFactory beanFactory = createBeanFactory();
+		beanFactory.setSerializationId(getId());
+		//设置是否可以循环依赖 allowCircularReferences
+		//是否允许使用相同名称重新注册不同的bean实现.
+		customizeBeanFactory(beanFactory);
+		//解析xml，并把xml中的标签封装成BeanDefinition对象
+		loadBeanDefinitions(beanFactory);
+		this.beanFactory = beanFactory;
+	}
+	catch (IOException ex) {
+		throw new ApplicationContextException("I/O error parsing bean definition source for " + getDisplayName(), ex);
+	}
+}
+
+protected DefaultListableBeanFactory createBeanFactory() {
+	return new DefaultListableBeanFactory(getInternalParentBeanFactory());
+}
+```
+
+`DefaultListableBeanFactory beanFactory = createBeanFactory();`返回的是`DefaultListableBeanFactory`
+
+customizeBeanFactory(beanFactory);这里面主要设置两个参数：
+
+```java
+protected void customizeBeanFactory(DefaultListableBeanFactory beanFactory) {
+	if (this.allowBeanDefinitionOverriding != null) {
+    //设置允许Bean定义覆盖
+		beanFactory.setAllowBeanDefinitionOverriding(this.allowBeanDefinitionOverriding);
+	}
+  //设置是否可以循环依赖
+	if (this.allowCircularReferences != null) {
+		beanFactory.setAllowCircularReferences(this.allowCircularReferences);
+	}
+}
+```
+
+重点看`loadBeanDefinitions(beanFactory)`，该方法又是钩子方法，它由`AbstractXmlApplicationContext`实现：
+
+```java
+protected void loadBeanDefinitions(DefaultListableBeanFactory beanFactory) throws BeansException, IOException {
+	// Create a new XmlBeanDefinitionReader for the given BeanFactory.
+	//创建xml的解析器，这里是一个委托模式
+	XmlBeanDefinitionReader beanDefinitionReader = new XmlBeanDefinitionReader(beanFactory);
+
+	// Configure the bean definition reader with this context's
+	// resource loading environment.
+	beanDefinitionReader.setEnvironment(this.getEnvironment());
+	//这里传一个this进去，因为ApplicationContext是实现了ResourceLoader接口的
+	beanDefinitionReader.setResourceLoader(this);
+	beanDefinitionReader.setEntityResolver(new ResourceEntityResolver(this));
+
+	// Allow a subclass to provide custom initialization of the reader,
+	// then proceed with actually loading the bean definitions.
+	initBeanDefinitionReader(beanDefinitionReader);
+	//主要看这个方法  重要程度 5
+	loadBeanDefinitions(beanDefinitionReader);
+}
+```
+
+XmlBeanDefinitionReader是xml的解析器，DefaultListableBeanFactory不完成XML解析的工作，该工作委托给了`XmlBeanDefinitionReader`来完成，看下类图：
+
+![image-20210311220757207](media/image-20210311220757207.png)
+
+## XmlBeanDefinitionReader
+
+上面的代码的重点方法是`AbstractXmlApplicationContext.loadBeanDefinitions(beanDefinitionReader)`：
+
+```java
+protected void loadBeanDefinitions(XmlBeanDefinitionReader reader) throws BeansException, IOException {
+	Resource[] configResources = getConfigResources();
+	if (configResources != null) {
+		reader.loadBeanDefinitions(configResources);
+	}
+	//获取需要加载的xml配置文件
+	String[] configLocations = getConfigLocations();
+	if (configLocations != null) {
+		reader.loadBeanDefinitions(configLocations);
+	}
+}
+```
+
+configLocations就是一个资源数组，里面保存的就是指定解析的xml配置文件：
+
+![image-20210311220609281](media/image-20210311220609281.png)
+
+经过调用
+
+```
+XmlBeanDefinitionReader.loadBeanDefinitions(configLocations) --->
+AbstractBeanDefinitionReader.loadBeanDefinitions(String location, @Nullable Set<Resource> actualResources)
+```
+
+AbstractBeanDefinitionReader.loadBeanDefinitions：
+
+```java
+public int loadBeanDefinitions(String location, @Nullable Set<Resource> actualResources) throws BeanDefinitionStoreException {
+	ResourceLoader resourceLoader = getResourceLoader();
+	if (resourceLoader == null) {
+    	......//不重要代码
+	}
+
+	if (resourceLoader instanceof ResourcePatternResolver) {
+		// Resource pattern matching available.
+		try {
+			//把字符串类型的xml文件路径，形如：classpath*:user/**/*-context.xml,转换成Resource对象类型，其实就是用流
+			//的方式加载配置文件，然后封装成Resource对象，不重要，可以不看
+			Resource[] resources = ((ResourcePatternResolver) resourceLoader).getResources(location);
+			//主要看这个方法 ** 重要程度 5
+			int count = loadBeanDefinitions(resources);
+			if (actualResources != null) {
+				Collections.addAll(actualResources, resources);
+			}
+      //不重要代码
+			......
+			return count;
+		}
+		catch (IOException ex) {
+      //不重要代码
+			......
+		}
+	}
+	else {
+    //不重要代码
+    ......
+		return count;
+	}
+}
+```
+
+参数location我们已经知道了，是一个字符串，而且是xml文件名字活匹配串，该方法中调用了
+
+````
+Resource[] resources = ((ResourcePatternResolver) resourceLoader).getResources(location);
+````
+
+该方法的实际作用就是通过流的方法去获取到xml文件，并且封装成一个Resource对象。而之所以是数组，是应为
+
+可能会是这样的匹配串：
+
+```
+classpath*:user/**/*-context.xml
+```
+
+好了，到重点方法int count = loadBeanDefinitions(resources);了
+
+```java
+@Override
+public int loadBeanDefinitions(Resource... resources) throws BeanDefinitionStoreException {
+	Assert.notNull(resources, "Resource array must not be null");
+	int count = 0;
+	for (Resource resource : resources) {
+		//模板设计模式，调用到子类中的方法
+		count += loadBeanDefinitions(resource);
+	}
+	return count;
+}
+```
+
+loadBeanDefinitions又是钩子方法，它的实现由子类XmlBeanDefinitionReader完成
+
+```java
+@Override
+public int loadBeanDefinitions(Resource resource) throws BeanDefinitionStoreException {
+	//EncodedResource带编码的对Resource对象的封装
+	return loadBeanDefinitions(new EncodedResource(resource));
+}
+```
+
+loadBeanDefinitions(EncodedResource encodedResource):
+
+```java
+public int loadBeanDefinitions(EncodedResource encodedResource) throws BeanDefinitionStoreException {
+	Assert.notNull(encodedResource, "EncodedResource must not be null");
+	if (logger.isTraceEnabled()) {
+		logger.trace("Loading XML bean definitions from " + encodedResource);
+	}
+
+	Set<EncodedResource> currentResources = this.resourcesCurrentlyBeingLoaded.get();
+
+	if (!currentResources.add(encodedResource)) {
+		throw new BeanDefinitionStoreException(
+				"Detected cyclic loading of " + encodedResource + " - check your import definitions!");
+	}
+
+	//获取Resource对象中的xml文件流对象
+	try (InputStream inputStream = encodedResource.getResource().getInputStream()) {
+
+		//InputSource是jdk中的sax xml文件解析对象
+		InputSource inputSource = new InputSource(inputStream);
+		if (encodedResource.getEncoding() != null) {
+			inputSource.setEncoding(encodedResource.getEncoding());
+		}
+		//主要看这个方法 **  重要程度 5
+		return doLoadBeanDefinitions(inputSource, encodedResource.getResource());
+	}
+	catch (IOException ex) {
+		........
+	}
+	finally {
+		currentResources.remove(encodedResource);
+		if (currentResources.isEmpty()) {
+			this.resourcesCurrentlyBeingLoaded.remove();
+		}
+	}
+}
+```
+
+这里就是开始加载xml文件，为xml文件生成一个InputStream。
+
+重点是`doLoadBeanDefinitions(inputSource, encodedResource.getResource());`方法
+
+```java
+protected int doLoadBeanDefinitions(InputSource inputSource, Resource resource)
+		throws BeanDefinitionStoreException {
+
+	try {
+		//把inputSource 封装成Document文件对象，这是jdk的API
+		Document doc = doLoadDocument(inputSource, resource);
+		//主要看这个方法，根据解析出来的document对象，拿到里面的标签元素封装成BeanDefinition
+		int count = registerBeanDefinitions(doc, resource);
+		//....log
+		return count;
+	}
+  ..........
+}
+
+public int registerBeanDefinitions(Document doc, Resource resource) throws BeanDefinitionStoreException {
+	//又来一记委托模式，BeanDefinitionDocumentReader委托这个类进行document的解析
+	BeanDefinitionDocumentReader documentReader = createBeanDefinitionDocumentReader();
+	int countBefore = getRegistry().getBeanDefinitionCount();
+
+	//主要看这个方法，createReaderContext(resource) XmlReaderContext上下文，封装了XmlBeanDefinitionReader对象
+	documentReader.registerBeanDefinitions(doc, createReaderContext(resource));
+	return getRegistry().getBeanDefinitionCount() - countBefore;
+}
+```
+
+上面兜兜转转，XmlBeanDefinitionReader其实就一个目的，读取xml的内容，并封装成一个Document对象，在 doLoadDocument(inputSource, resource)里完成这一过程。那有了xml文件的信息了，接下来就是去解析xml信息并封装成对象了，从单一职责原则看，XmlBeanDefinitionReader的职责已经完成了，所以它创建了`BeanDefinitionDocumentReader`类，将解析工作交给它。
+
+## BeanDefinitionDocumentReader
+
+该接口的实现类为`DefaultBeanDefinitionDocumentReader`，`registerBeanDefinitions`就是该类的核心方法
+
+```java
+public void registerBeanDefinitions(Document doc, XmlReaderContext readerContext) {
+	this.readerContext = readerContext;
+	//主要看这个方法，把root节点传进去
+	doRegisterBeanDefinitions(doc.getDocumentElement());
+}
+```
+
+doc.getDocumentElement()，用来获取XMl的root节点，也就是spring配置文件的beans元素。
+
+```java
+	protected void doRegisterBeanDefinitions(Element root) {
+		BeanDefinitionParserDelegate parent = this.delegate;
+		this.delegate = createDelegate(getReaderContext(), root, parent);
+    ........
+		preProcessXml(root);
+		//主要看这个方法，标签具体解析过程
+		parseBeanDefinitions(root, this.delegate);
+		postProcessXml(root);
+
+		this.delegate = parent;
+	}
+```
+
+注意，这里又是一个委托，看`createDelegate`，这个方法返回了`BeanDefinitionParserDelegate`，从名字上看该类是真正将xml的信息封装成BeanDefinition的。往下看，
+
+有两个空方法`preProcessXml`和`postProcessXml`，这两个在默认的实现类中什么都不做，这是为了扩展才提供了，看重点方法`parseBeanDefinitions(root, this.delegate);`
+
+```java
+protected void parseBeanDefinitions(Element root, BeanDefinitionParserDelegate delegate) {
+	if (delegate.isDefaultNamespace(root)) {
+		NodeList nl = root.getChildNodes();
+		for (int i = 0; i < nl.getLength(); i++) {
+			Node node = nl.item(i);
+			if (node instanceof Element) {
+				Element ele = (Element) node;
+				if (delegate.isDefaultNamespace(ele)) {
+					//默认标签解析
+					parseDefaultElement(ele, delegate);
+				}
+				else {
+					//自定义标签解析
+					delegate.parseCustomElement(ele);
+				}
+			}
+		}
+	}
+	else {
+		delegate.parseCustomElement(root);
+	}
+}
+```
+
+该方法就是遍历beans里面的元素。而这里又分为默认标签解析和自定义标签解析
+
+### 默认标签解析
+
+传统标签解析：bean、beans、import和alias
+
+parseDefaultElement(ele, delegate)，解析默认标签解析：
+
+```java
+private void parseDefaultElement(Element ele, BeanDefinitionParserDelegate delegate) {
+	//import标签解析  重要程度 1 ，可看可不看
+	if (delegate.nodeNameEquals(ele, IMPORT_ELEMENT)) {
+		importBeanDefinitionResource(ele);
+	}
+	//alias标签解析 别名标签  重要程度 1 ，可看可不看
+	else if (delegate.nodeNameEquals(ele, ALIAS_ELEMENT)) {
+		processAliasRegistration(ele);
+	}
+	//bean标签，重要程度  5，必须看
+	else if (delegate.nodeNameEquals(ele, BEAN_ELEMENT)) {
+		processBeanDefinition(ele, delegate);
+	}
+  // 这里是解析beans，其实可以看作是遍历bean而已
+	else if (delegate.nodeNameEquals(ele, NESTED_BEANS_ELEMENT)) {
+		// recurse
+		doRegisterBeanDefinitions(ele);
+	}
+}
+```
+
+我们值看bean标签的解析，`processBeanDefinition`：
+
+```java
+protected void processBeanDefinition(Element ele, BeanDefinitionParserDelegate delegate) {
+	//重点看这个方法，重要程度 5 ，解析document，封装成BeanDefinition
+	BeanDefinitionHolder bdHolder = delegate.parseBeanDefinitionElement(ele);
+	if (bdHolder != null) {
+		//该方法功能不重要，设计模式重点看一下，装饰者设计模式，加上SPI设计思想
+		bdHolder = delegate.decorateBeanDefinitionIfRequired(ele, bdHolder);
+		try {
+			//完成document到BeanDefinition对象转换后，对BeanDefinition对象进行缓存注册
+			// Register the final decorated instance.
+			BeanDefinitionReaderUtils.registerBeanDefinition(bdHolder, getReaderContext().getRegistry());
+		}
+		catch (BeanDefinitionStoreException ex) {
+     	.........
+		}
+		// Send registration event.
+		getReaderContext().fireComponentRegistered(new BeanComponentDefinition(bdHolder));
+	}
+}
+```
+
+现在已经有xml的bean标签的对应的对象了，如果是我做的会解析该xml的bean标签的信息并把这些信息封装到一个对象中，而spring也是这样做的，spring会把信息封装成`BeanDefinition`
+
+重点看BeanDefinitionHolder bdHolder = delegate.parseBeanDefinitionElement(ele);，这个方法就是去解析document，封装成`BeanDefinition`的，跟踪代码到BeanDefinitionParserDelegate.parseBeanDefinitionElement：
+
+```java
+	@Nullable
+	public BeanDefinitionHolder parseBeanDefinitionElement(Element ele, @Nullable BeanDefinition containingBean) {
+		String id = ele.getAttribute(ID_ATTRIBUTE);
+		String nameAttr = ele.getAttribute(NAME_ATTRIBUTE);
+
+		List<String> aliases = new ArrayList<>();
+		if (StringUtils.hasLength(nameAttr)) {
+			String[] nameArr = StringUtils.tokenizeToStringArray(nameAttr, MULTI_VALUE_ATTRIBUTE_DELIMITERS);
+			aliases.addAll(Arrays.asList(nameArr));
+		}
+
+		String beanName = id;
+		if (!StringUtils.hasText(beanName) && !aliases.isEmpty()) {
+			........
+		}
+
+		//检查beanName是否重复
+		if (containingBean == null) {
+			checkNameUniqueness(beanName, aliases, ele);
+		}
+
+		//<bean>标签解析的核心方法，重要程度5
+		AbstractBeanDefinition beanDefinition = parseBeanDefinitionElement(ele, beanName, containingBean);
+		if (beanDefinition != null) {
+			if (!StringUtils.hasText(beanName)) {
+				try {
+					if (containingBean != null) {
+						beanName = BeanDefinitionReaderUtils.generateBeanName(
+								beanDefinition, this.readerContext.getRegistry(), true);
+					}
+					else {
+						beanName = this.readerContext.generateBeanName(beanDefinition);
+						String beanClassName = beanDefinition.getBeanClassName();
+						if (beanClassName != null &&
+								beanName.startsWith(beanClassName) && beanName.length() > beanClassName.length() &&
+								!this.readerContext.getRegistry().isBeanNameInUse(beanClassName)) {
+							aliases.add(beanClassName);
+						}
+					}
+					if (logger.isTraceEnabled()) {
+						logger.trace("Neither XML 'id' nor 'name' specified - " +
+								"using generated bean name [" + beanName + "]");
+					}
+				}
+				catch (Exception ex) {
+					error(ex.getMessage(), ele);
+					return null;
+				}
+			}
+			String[] aliasesArray = StringUtils.toStringArray(aliases);
+			return new BeanDefinitionHolder(beanDefinition, beanName, aliasesArray);
+		}
+
+		return null;
+	}
+```
+
+首先获取id和name（也就是bean的别名），别名逗号切割，放入List\<String> aliases中
+
+而id会赋值给beanName引用，这也是bean的名字，而name会作为bean的别名，一直到
+
+```
+AbstractBeanDefinition beanDefinition = parseBeanDefinitionElement(ele, beanName, containingBean);
+```
+
+该方法是\<bean>标签解析的核心方法，会创建一个BeanDefinition对象，这个BeanDefinition的类型为`GenericBeanDefinition`
+
+parseBeanDefinitionElement：
+
+```java
+	public AbstractBeanDefinition parseBeanDefinitionElement(
+			Element ele, String beanName, @Nullable BeanDefinition containingBean) {
+
+		this.parseState.push(new BeanEntry(beanName));
+
+		String className = null;
+		if (ele.hasAttribute(CLASS_ATTRIBUTE)) {
+			className = ele.getAttribute(CLASS_ATTRIBUTE).trim();
+		}
+		String parent = null;
+		if (ele.hasAttribute(PARENT_ATTRIBUTE)) {
+			parent = ele.getAttribute(PARENT_ATTRIBUTE);
+		}
+
+		try {
+			//创建GenericBeanDefinition对象
+			AbstractBeanDefinition bd = createBeanDefinition(className, parent);
+
+			//解析bean标签的属性，并把解析出来的属性设置到BeanDefinition对象中
+			parseBeanDefinitionAttributes(ele, beanName, containingBean, bd);
+			bd.setDescription(DomUtils.getChildElementValueByTagName(ele, DESCRIPTION_ELEMENT));
+
+			//解析bean中的meta标签
+			parseMetaElements(ele, bd);
+			//解析bean中的lookup-method标签  重要程度：2，可看可不看
+			parseLookupOverrideSubElements(ele, bd.getMethodOverrides());
+			//解析bean中的replaced-method标签  重要程度：2，可看可不看
+			parseReplacedMethodSubElements(ele, bd.getMethodOverrides());
+
+			//解析bean中的constructor-arg标签  重要程度：2，可看可不看
+			parseConstructorArgElements(ele, bd);
+			//解析bean中的property标签  重要程度：2，可看可不看
+			parsePropertyElements(ele, bd);
+			//可以不看，用不到
+			parseQualifierElements(ele, bd);
+
+			bd.setResource(this.readerContext.getResource());
+			bd.setSource(extractSource(ele));
+
+			return bd;
+		}
+    ......
+		finally {
+			this.parseState.pop();
+		}
+
+		return null;
+	}
+
+//createBeanDefinition(className, parent)
+	protected AbstractBeanDefinition createBeanDefinition(@Nullable String className, @Nullable String parentName)
+			throws ClassNotFoundException {
+
+		return BeanDefinitionReaderUtils.createBeanDefinition(
+				parentName, className, this.readerContext.getBeanClassLoader());
+	}
+
+//BeanDefinitionReaderUtils.createBeanDefinition(
+//				parentName, className, this.readerContext.getBeanClassLoader());
+	public static AbstractBeanDefinition createBeanDefinition(
+			@Nullable String parentName, @Nullable String className, @Nullable ClassLoader classLoader) throws ClassNotFoundException {
+
+		GenericBeanDefinition bd = new GenericBeanDefinition();
+		bd.setParentName(parentName);
+		if (className != null) {
+			if (classLoader != null) {
+				bd.setBeanClass(ClassUtils.forName(className, classLoader));
+			}
+			else {
+				bd.setBeanClassName(className);
+			}
+		}
+		return bd;
+	}
+```
+
+好了，终于看到`GenericBeanDefinition bd = new GenericBeanDefinition()`了
+
+下图是`GenericBeanDefinition`的重要属性属性
+
+![image-20210311225701841](media/image-20210311225701841.png)
+
+好了，现在已经获取到了BeanDefinition，并把BeanDefinition在封装成了BeanDefinitionHolder了，那最后就是注册了吧，这步放到自定义标签（包扫描）上讲。
+
+### 自定义标签
+
+自定义标签解析 如：<context:component-scan base-package="com.xiangxue.jack"/>
+自定义标签解析流程：
+		a、根据当前解析标签的头信息找到对应的namespaceUri
+		b、加载spring所有jar中的spring.handlers文件。并建立映射关系
+		c、根据namespaceUri从映射关系中找到对应的实现了NamespaceHandler接口的类
+		d、调用NamespaceHandler类的init方法，init方法是注册了各种自定义标签的解析类
+		e、根据namespaceUri找到对应的解析类，然后调用paser方法完成标签解析
+
+回到DefaultBeanDefinitionDocumentReader#parseBeanDefinitions(Element root, BeanDefinitionParserDelegate delegate)，
+
+```java
+	protected void parseBeanDefinitions(Element root, BeanDefinitionParserDelegate delegate) {
+		if (delegate.isDefaultNamespace(root)) {
+			NodeList nl = root.getChildNodes();
+			for (int i = 0; i < nl.getLength(); i++) {
+				Node node = nl.item(i);
+				if (node instanceof Element) {
+					Element ele = (Element) node;
+					if (delegate.isDefaultNamespace(ele)) {
+						//默认标签解析
+						parseDefaultElement(ele, delegate);
+					}
+					else {
+						//自定义标签解析
+						delegate.parseCustomElement(ele);
+					}
+				}
+			}
+		}
+		else {
+			delegate.parseCustomElement(root);
+		}
+	}
+```
+
+看delegate.parseCustomElement(ele)，该方法就是去解析自定义标签的。
+
+可以看到自定义标签的解析是交给了BeanDefinitionParserDelegate完成，看
+
+BeanDefinitionParserDelegate#parseCustomElement
+
+```java
+public BeanDefinition parseCustomElement(Element ele) {
+	return parseCustomElement(ele, null);
+}
+
+public BeanDefinition parseCustomElement(Element ele, @Nullable BeanDefinition containingBd) {
+	String namespaceUri = getNamespaceURI(ele);
+	if (namespaceUri == null) {
+		return null;
+	}
+	NamespaceHandler handler = this.readerContext.getNamespaceHandlerResolver().resolve(namespaceUri);
+	if (handler == null) {
+    .......
+	}
+	return handler.parse(ele, new ParserContext(this.readerContext, this, containingBd));
+}
+```
+
+有个namespaceUri，这个就是这些值
+
+![image-20210312003549186](media/image-20210312003549186.png)
+
+![image-20210503224046557](media/image-20210503224046557.png)
+
+看下方法
+
+```java
+NamespaceHandler handler = this.readerContext.getNamespaceHandlerResolver().resolve(namespaceUri);
+```
+
+`NamespaceHandlerResolver`的默认实现是`DefaultNamespaceHandlerResolver`
+
+DefaultNamespaceHandlerResolver#resolve：
+
+```java
+	public NamespaceHandler resolve(String namespaceUri) {
+		//获取spring中所有jar包里面的 "META-INF/spring.handlers"文件，并且建立映射关系
+		Map<String, Object> handlerMappings = getHandlerMappings();
+		//根据namespaceUri：http://www.springframework.org/schema/context，获取到这个命名空间的处理类
+		Object handlerOrClassName = handlerMappings.get(namespaceUri);
+    ........
+		else {
+			String className = (String) handlerOrClassName;
+			try {
+				Class<?> handlerClass = ClassUtils.forName(className, this.classLoader);
+				if (!NamespaceHandler.class.isAssignableFrom(handlerClass)) {
+					......
+				}
+				NamespaceHandler namespaceHandler = (NamespaceHandler) BeanUtils.instantiateClass(handlerClass);
+
+				//调用处理类的init方法，在init方法中完成标签元素解析类的注册
+				namespaceHandler.init();
+        //这里还做了缓存，第一次获取的是clasName，通过className来创建对象，第二次去获取的时候就能直接获取到对应的namespaceHandler对象了
+				handlerMappings.put(namespaceUri, namespaceHandler);
+				return namespaceHandler;
+			}
+			catch (ClassNotFoundException ex) {
+				......
+			}
+			catch (LinkageError err) {
+        ......
+			}
+		}
+	}
+```
+
+方法：`Map<String, Object> handlerMappings = getHandlerMappings();`该方法会去获所有的"META-INF/spring.handlers"文件，并解析，然后建立映射关系(这让我想到java SPI和Dubbo SPI)
+
+看下该方法的返回值：
+
+![image-20210312022433159](media/image-20210312022433159.png)
+
+好了这就是Spring的SPI了，和dubbo一样，都是使用key，value的方式
+
+看下spring.handlers:
+
+![image-20210312023838005](media/image-20210312023838005.png)
+
+这些类都是继承了NamespaceHandlerSupport
+
+![image-20210312023927138](media/image-20210312023927138.png)
+
+方法`registerBeanDefinitionParser`的定义
+
+![image-20210312023949703](media/image-20210312023949703.png)
+
+![image-20210312025359762](media/image-20210312025359762.png)
+
+可以看到`registerBeanDefinitionParser`其实就是把BeanDefinitionParser放入到了一个parsers的Map中。这些解析类是什么时候调用的呢？往下看。
+
+上面已经获取了得到了对应关系\<自定义标签名,NamespaceHandler>，接着执行了方法：
+
+```
+Object handlerOrClassName = handlerMappings.get(namespaceUri);
+```
+
+就可以根据namespaceUri从映射关系中找到对应的实现了NamespaceHandler接口的类，一开始时，返回值是类的全限定名，这时就需要创建并缓存了。
+
+接着就会创建该NamespaceHandler对象并执行到了NamespaceHandler的init方法
+
+```java
+			try {
+				Class<?> handlerClass = ClassUtils.forName(className, this.classLoader);
+				if (!NamespaceHandler.class.isAssignableFrom(handlerClass)) {
+					......
+				}
+				NamespaceHandler namespaceHandler = (NamespaceHandler) BeanUtils.instantiateClass(handlerClass);
+
+				//调用处理类的init方法，在init方法中完成标签元素解析类的注册
+				namespaceHandler.init();
+				handlerMappings.put(namespaceUri, namespaceHandler);
+				return namespaceHandler;
+			}
+```
+
+从上边的介绍可知init方法是注册了各种自定义标签的解析类，把这些标签的解析类入了一个Map中。
+
+好了，现在已经获取了自定义标签的NamespaceHandler，而且已经把对应的解析类都注册了，也就是说，比如xml文件这样写了
+
+```
+    <!--自定义标签-->
+    <context:component-scan base-package="com.enjoy.jack">
+
+    </context:component-scan>
+    <context:property-placeholder location="classpath:application.properties"/>
+```
+
+经过上面的步骤，我通过context，得到了uri，也就是这个
+
+![image-20210312030255546](media/image-20210312030255546.png)
+
+然后根据URI，并使用了SPI获取到了这个URI对应的`NamespaceHandlerSupport`，也就是`ContextNamespaceHandler`，而`ContextNamespaceHandler`的定义也很简单，就是重写了init方法，
+![image-20210312023927138](media/image-20210312023927138.png)
+
+接着就创建`ContextNamespaceHandler`对象并调用了这个init方法，把`component-scan`、`property-placeholder`等这些对应的`BeanDefinitionParser`做了一个对应关系，并放入了一个Map中。
+
+最后就只剩下解析了，回到`BeanDefinitionParserDelegate#parseCustomElement`方法。该方法最后执行了
+
+```
+handler.parse(ele, new ParserContext(this.readerContext, this, containingBd));
+```
+
+handler就是之前获取的`ContextNamespaceHandler`，也就是`ContextNamespaceHandler`。上面介绍了`ContextNamespaceHandler`的定义，他是没有重写parse方法的，所以这方法是从父类NamespaceHandlerSupport中继承过来的
+
+看NamespaceHandlerSupport#parse
+
+![image-20210312031352326](media/image-20210312031352326.png)
+
+也就是根据标签获取对应的BeanDefinitionParser，接着执行了parse方法。
+
+我们最关注的肯定是扫描标签:
+
+![image-20210312031532777](media/image-20210312031532777.png)
+
+所以根据上面的介绍可知`component-scan`对应的解析类是`ComponentScanBeanDefinitionParser`
+
+`ComponentScanBeanDefinitionParser#parse`
+
+```java
+public BeanDefinition parse(Element element, ParserContext parserContext) {
+	//获取basePackage属性
+	String basePackage = element.getAttribute(BASE_PACKAGE_ATTRIBUTE);
+	basePackage = parserContext.getReaderContext().getEnvironment().resolvePlaceholders(basePackage);
+	//可以用逗号分开
+	String[] basePackages = StringUtils.tokenizeToStringArray(basePackage,
+			ConfigurableApplicationContext.CONFIG_LOCATION_DELIMITERS);
+
+	//创建注解扫描器
+	// Actually scan for bean definitions and register them.
+	ClassPathBeanDefinitionScanner scanner = configureScanner(parserContext, element);
+	//扫描并把扫描的类封装成beanDefinition对象  核心方法，重要程度 5
+	Set<BeanDefinitionHolder> beanDefinitions = scanner.doScan(basePackages);
+	registerComponents(parserContext.getReaderContext(), beanDefinitions, element);
+
+	return null;
+}
+```
+
+先获取basePackage属性，就是包路径，然后调用configureScanner，创建注解扫描器`ClassPathBeanDefinitionScanner`。
+
+#### 包扫描——ClassPathBeanDefinitionScanner
+
+看下该类的类图：
+
+![image-20210312234104974](media/image-20210312234104974.png)
+
+该类会去扫描有这些注解的类：
+
+- @Component
+- @Service
+- @Repository
+- @Configuration
+
+看下`ClassPathBeanDefinitionScanner`的创建，useDefaultFilters默认就是true，不信自己看源码吧
+
+```java
+	public ClassPathBeanDefinitionScanner(BeanDefinitionRegistry registry, boolean useDefaultFilters,
+			Environment environment, @Nullable ResourceLoader resourceLoader) {
+
+		Assert.notNull(registry, "BeanDefinitionRegistry must not be null");
+		this.registry = registry;
+
+		if (useDefaultFilters) {
+			registerDefaultFilters();
+		}
+		setEnvironment(environment);
+		setResourceLoader(resourceLoader);
+	}
+```
+
+useDefaultFilters默认情况下为true，重点看下registerDefaultFilters：
+
+```java
+protected void registerDefaultFilters() {
+	this.includeFilters.add(new AnnotationTypeFilter(Component.class));
+	ClassLoader cl = ClassPathScanningCandidateComponentProvider.class.getClassLoader();
+  //不重要的方法
+  .........
+}
+```
+
+逻辑很简单，就是把需要扫描的注解的class对象封装成`AnnotationTypeFilter`，然后放到了一个内部的集合`includeFilters`中
+
+![image-20210312235056985](media/image-20210312235056985.png)
+
+回到代码，这里就放了Component.class这个注解！和上面说的不同，那我们就看下其他注解的定义
+
+![image-20210312235253681](media/image-20210312235253681.png)
+
+![image-20210312235304693](media/image-20210312235304693.png)
+
+![image-20210312235312487](media/image-20210312235312487.png)
+
+其他3个注解都加了Component注解！也就是这些注解都能被识别
+
+回到 `ComponentScanBeanDefinitionParser.parse`(Element element, ParserContext parserContext)方法
+
+```java
+//创建注解扫描器
+// Actually scan for bean definitions and register them.
+ClassPathBeanDefinitionScanner scanner = configureScanner(parserContext, element);
+//扫描并把扫描的类封装成beanDefinition对象  核心方法，重要程度 5
+Set<BeanDefinitionHolder> beanDefinitions = scanner.doScan(basePackages);
+registerComponents(parserContext.getReaderContext(), beanDefinitions, element);
+```
+
+创建完了`ClassPathBeanDefinitionScanner`后就执行了doScan，方法，看下该方法：
+
+```java
+protected Set<BeanDefinitionHolder> doScan(String... basePackages) {
+	Assert.notEmpty(basePackages, "At least one base package must be specified");
+	Set<BeanDefinitionHolder> beanDefinitions = new LinkedHashSet<>();
+	for (String basePackage : basePackages) {
+		//扫描到有注解的类并封装成BeanDefinition对象
+		Set<BeanDefinition> candidates = findCandidateComponents(basePackage);
+    .....
+    //还有其他代码，放在后面讲
+	}
+	return beanDefinitions;
+}
+```
+
+重点看`findCandidateComponents`，该方法会扫描到有Component注解的类并封装成BeanDefinition对象
+
+![image-20210313000000565](media/image-20210313000000565.png)
+
+好，看scanCandidateComponents方法
+
+![image-20210313000230205](media/image-20210313000230205.png)
+
+先创建了一个`Set<BeanDefinition> candidates = new LinkedHashSet<>();`
+
+作用猜都猜到了，就是放包含注解的BeanDefintition的，看下resources有什么。
+
+![image-20210313000805963](media/image-20210313000805963.png)
+
+可以看到，resources就是指向一个类文件的对象。接着就是去遍历这些文件，并检查是否有`Component`注解。
+
+看for循环的代码主要代码。
+
+```java
+MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);
+//如果类上面有includeFilters注解
+if (isCandidateComponent(metadataReader)) {
+	ScannedGenericBeanDefinition sbd = new ScannedGenericBeanDefinition(metadataReader);
+	sbd.setSource(resource);
+	if (isCandidateComponent(sbd)) {
+		if (debugEnabled) {
+			logger.debug("Identified candidate component class: " + resource);
+		}
+		candidates.add(sbd);
+	}
+	else {
+		if (debugEnabled) {
+			logger.debug("Ignored because not a concrete top-level class: " + resource);
+		}
+	}
+}
+```
+
+代码很好理解，就是把类的的信息封装成MetadataReader对象，然后检查是否有对应的注解，有就创建一个`ScannedGenericBeanDefinition`对象。
+
+这里先重点说下这段代码
+
+```java
+MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);
+```
+
+getMetadataReaderFactory()返回的是`CachingMetadataReaderFactory`
+
+![image-20210313002413453](media/image-20210313002413453.png)
+
+接着getMetadataReader方法，这里
+
+![image-20210313002508509](media/image-20210313002508509.png)
+
+> 里面的源码不说，不过这里有个疑问，spring会不会去触发类的加载，如果有触发，那传个ClassLoader进去是可以理解的，因为一个类的最终确定，是要类加载器和类的全限定名来确定的，而如果有触发，那就会把类的静态存储结构转化为方法区的运行时数据结构，也就是说会占用内存，如果有大量的类是不使用的，那就浪费资源了。
+>
+> 我稍微看了这个getMetadataReader，没细看，而且之前生产BeanDefinition的时候是没触发类的加载的。所以猜测是用了和javap类似的技术，去解析类的静态存储结构里的数据。
+
+回到遍历的代码，现在看下MetadataReader对象的数据
+
+![image-20210313005118501](media/image-20210313005118501.png)
+
+回到代码， isCandidateComponent(metadataReader)这个方法匹配会匹配是否有对应的注解，有就会去创建`ScannedGenericBeanDefinition`
+
+看下`ScannedGenericBeanDefinition`的类图:
+
+![image-20210313005738915](media/image-20210313005738915.png)
+
+它是继承了`GenericBeanDefinition`，里面就多了个AnnotationMetadata属性，也就是保存了注解的属性
+
+![image-20210313005841981](media/image-20210313005841981.png)
+
+注意在这一步只是传入AnnotationMetadata属性后就放入之前创建的集合中了，类中注解里面的属性值和其他注解信息还没设置。
+
+回到ClassPathBeanDefinitionScanner#doScan方法
+
+```java
+protected Set<BeanDefinitionHolder> doScan(String... basePackages) {
+  //省略了部分代码
+  .....
+		//扫描到有注解的类并封装成BeanDefinition对象
+		Set<BeanDefinition> candidates = findCandidateComponents(basePackage);
+		for (BeanDefinition candidate : candidates) {
+      //bean的范围
+			ScopeMetadata scopeMetadata = this.scopeMetadataResolver.resolveScopeMetadata(candidate);
+			candidate.setScope(scopeMetadata.getScopeName());
+			String beanName = this.beanNameGenerator.generateBeanName(candidate, this.registry);
+			if (candidate instanceof AbstractBeanDefinition) {
+				postProcessBeanDefinition((AbstractBeanDefinition) candidate, beanName);
+			}
+			// 用注解的信息来完善BeanDefinition
+			if (candidate instanceof AnnotatedBeanDefinition) {
+				//支持了@Lazy @DependOn注解
+				AnnotationConfigUtils.processCommonDefinitionAnnotations((AnnotatedBeanDefinition) candidate);
+			}
+      //省略的部分代码
+      ....
+      代码1
+		}
+  //省略了部分代码
+  .....
+}
+```
+
+![image-20210313010543195](media/image-20210313010543195.png)
+
+> 可以看到，之前讲bean标签的时候没说，String中bean的范围默认是`singleton`也就是单例。
+
+上面的代码就是解析注解，然后对BeanDefinition的属性数据填充，bean的范围啊、是否懒加载。具体看[BeanDefinition的信息图](00Spring中一些重要的图)
+
+好了，BeanDefinition的初始化就完成了，现在还差个注册。
+
+### beanDefinition注册到BeanFactory对象中
+
+> 这里的BeanFactory真实类型就是一开始创建测DefaultListableBeanFactory，而该类又实现了BeanDefinitionRegistry接口，所以这里涉及到的BeanDefinitionRegistry的对应引用都是`DefaultListableBeanFactory`类型的对象
+
+默认标签的BeanDefinition和自定义标签的BeanDefinition在创建完后都要注册器BeanFactory中。
+
+这里以自定义标签的BeanDefinition的注册来讲。
+
+代码接着上面doScan代码
+
+最后检查BeanDefinition是否已经已经注册了，没有就去注册。执行*代码1*(是在doScan的for循环里面的)
+
+```java
+// 检查是否已经注册过了
+if (checkCandidate(beanName, candidate)) {
+	BeanDefinitionHolder definitionHolder = new BeanDefinitionHolder(candidate, beanName);
+	definitionHolder = AnnotationConfigUtils.applyScopedProxyMode(scopeMetadata, definitionHolder, this.registry);
+	beanDefinitions.add(definitionHolder);
+	//BeanDefinition注册
+	registerBeanDefinition(definitionHolder, this.registry);
+}
+```
+
+又是包装，这里会把把`BeanDefinition`，包装成了一个`BeanDefinitionHolder`，然后执行了
+
+`registerBeanDefinition(definitionHolder, this.registry);`
+
+![image-20210313012431590](media/image-20210313012431590.png)
+
+这个`BeanDefinitionRegistry`的实现是`DefaultListableBeanFactory`！终于看到BeanFactory了！
+
+![image-20210313012814381](media/image-20210313012814381.png)
+
+![image-20210313013001342](media/image-20210313013001342.png)
+
+`DefaultListableBeanFactory`实现了`BeanDefinitionRegistry`这个接口，看名字就知道作用是什么了。
+
+看`DefaultListableBeanFactory#registerBeanDefinition`方法
+
+```java
+	@Override
+	public void registerBeanDefinition(String beanName, BeanDefinition beanDefinition)
+			throws BeanDefinitionStoreException {
+    //省略校验代码
+    .....
+		//先判断BeanDefinition是否已经注册
+		BeanDefinition existingDefinition = this.beanDefinitionMap.get(beanName);
+		if (existingDefinition != null) {
+      //是否允许覆盖
+			if (!isAllowBeanDefinitionOverriding()) {
+				throw new BeanDefinitionOverrideException(beanName, beanDefinition, existingDefinition);
+			}
+      //只是打印信息而已
+      .....
+			this.beanDefinitionMap.put(beanName, beanDefinition);
+		}
+		else {
+			if (hasBeanCreationStarted()) {
+				// Cannot modify startup-time collection elements anymore (for stable iteration)
+				synchronized (this.beanDefinitionMap) {
+					this.beanDefinitionMap.put(beanName, beanDefinition);
+					List<String> updatedDefinitions = new ArrayList<>(this.beanDefinitionNames.size() + 1);
+					updatedDefinitions.addAll(this.beanDefinitionNames);
+					updatedDefinitions.add(beanName);
+					this.beanDefinitionNames = updatedDefinitions;
+					removeManualSingletonName(beanName);
+				}
+			} else {
+				//把beanDefinition缓存到map中
+				// Still in startup registration phase
+				this.beanDefinitionMap.put(beanName, beanDefinition);
+				//把beanName放到beanDefinitionNames list中，这个list着重记住，bean实例化的时候需要用到
+				this.beanDefinitionNames.add(beanName);
+				removeManualSingletonName(beanName);
+			}
+			this.frozenBeanDefinitionNames = null;
+		}
+
+		if (existingDefinition != null || containsSingleton(beanName)) {
+			resetBeanDefinition(beanName);
+		}
+		else if (isConfigurationFrozen()) {
+			clearByTypeCache();
+		}
+	}
+```
+
+注册实际上就是放入`DefaultListableBeanFactory`中的beanDefinitionMap中，并且把beanDefinition对应的名字放入`DefaultListableBeanFactory`的beanDefinitionNames的集合中。而这个beanName，默认规则是类的名字，头字母小写。
+
+这里涉及到两个集合`beanDefinitionMap`和`beanDefinitionNames`，看下这两个属性的定义
+
+![image-20210313014132169](media/image-20210313014132169.png)
+
+![image-20210313014149903](media/image-20210313014149903.png)
+
+好了，现在BeanDefinition已经注册到beanFactory中了，看下之后的代码
+
+![image-20210313012431590](media/image-20210313012431590.png)
+
+![image-20210313014738775](media/image-20210313014738775.png)
+
+别名也去注册了，不过别名是和beanName做映射的。(这让我想起了Innodb中聚集索引和非聚集索引的关系)
+
+也就是说，通过别名找bean，实际上是找到了bean的beanName，然后才找到bean的
+
+现在已经完成了BeanDefinition的注册了，回到调用的地方`ComponentScanBeanDefinitionParser#parse`
+
+![image-20210313015034077](media/image-20210313015034077.png)
+
+注册完BeanDefinition后，还执行了一行
+
+```
+registerComponents(parserContext.getReaderContext(), beanDefinitions, element);
+```
+
+这代码的核心是在
+
+![image-20210313022033540](media/image-20210313022033540.png)
+
+由于这是扫描注解的，annotationConfig是为true的，所以会执行`AnnotationConfigUtils#registerAnnotationConfigProcessors`添加各种的PostProcessor，而重点的PostProcessor如下：
+
+1. 添加ConfigurationClassPostProcessor
+   ![image-20210313015518043](media/image-20210313015518043.png)
+   ![image-20210313015504990](media/image-20210313015504990.png)
+
+2. 添加AutowiredAnnotationBeanPostProcessor
+
+   ![image-20210313020415219](media/image-20210313020415219.png)
+
+   ![image-20210313020431890](media/image-20210313020431890.png)
+
+3. 添加CommonAnnotationBeanPostProcessor
+   ![image-20210313020511410](media/image-20210313020511410.png)
+   ![image-20210313020522342](media/image-20210313020522342.png)
+
+上面的3处代码都会检查下刚刚注册的beanDefinition中有没有名字为下面的：
+
+- `org.springframework.context.annotation.internalConfigurationBeanNameGenerator`
+- `org.springframework.context.annotation.internalAutowiredAnnotationProcessor`
+- `org.springframework.context.annotation.internalCommonAnnotationProcessor`
+
+这些的`BeanDefinition`如果没有就创建对应的`RootBeanDefinition`
+
+```java
+RootBeanDefinition def = new RootBeanDefinition(AutowiredAnnotationBeanPostProcessor.class);
+RootBeanDefinition def = new RootBeanDefinition(CommonAnnotationBeanPostProcessor.class);
+RootBeanDefinition def = new RootBeanDefinition(ConfigurationClassPostProcessor.class);
+```
+
+然后把创建好的`RootBeanDefinition`作为后置处理器（BeanDefinitionRegistryPostProcessor）注册到注册器beanFactory中。
+
+这三个类很重要，和之后的流程有关，这里就记下是在什么时候到把这些PostProcessor注册到beanFactory中的：
+
+- `CommonAnnotationBeanPostProcessor.class`
+- `AutowiredAnnotationBeanPostProcessor.class`
+- `ConfigurationClassPostProcessor.class`
+
+看下各个类的类图
+
+![image-20210313023954299](media/image-20210313023954299.png)
+
+![image-20210313024038039](media/image-20210313024038039.png)
+
+![image-20210313024104673](media/image-20210313024104673.png)
+
+## xml解析和BeanDefinition封装核心方法
+
+![xml解析和BeanDefinition封装核心方法 refreshBeanFactory()](media/xml%E8%A7%A3%E6%9E%90%E5%92%8CBeanDefinition%E5%B0%81%E8%A3%85%E6%A0%B8%E5%BF%83%E6%96%B9%E6%B3%95%20refreshBeanFactory().jpg)
+
+## 扫描的流程图
+
+![&lt;context_component-scan base-package=&quot;&quot;&gt;解析流程](media/&lt;context_component-scan%20base-package=&quot;&quot;&gt;%E8%A7%A3%E6%9E%90%E6%B5%81%E7%A8%8B.jpg)
+
