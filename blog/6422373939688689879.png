@@ -1,0 +1,115 @@
+# Spring自定义Scope
+
+## Bean 的多例作用域(如何管理 bean而已)
+
+![image-20210316220137120](media/image-20210316220137120.png)
+
+## 自定义作用域(Scope)
+
+自定义Scope要回到`AbstractBeanFactory#doGetBean`方法，源码
+
+```java
+protected <T> T doGetBean(
+		String name, @Nullable Class<T> requiredType, @Nullable Object[] args, boolean typeCheckOnly)
+		throws BeansException {
+  //去掉和这节没关的代码
+  ...
+	String beanName = transformedBeanName(name);
+	Object bean;
+  //去掉和这节没关的代码
+  ...
+			else {
+				String scopeName = mbd.getScope();
+				Scope scope = this.scopes.get(scopeName);
+				try {
+					Object scopedInstance = scope.get(beanName, () -> {
+						beforePrototypeCreation(beanName);
+						try {
+							return createBean(beanName, mbd, args);
+						}
+						finally {
+							afterPrototypeCreation(beanName);
+						}
+					});
+					bean = getObjectForBeanInstance(scopedInstance, name, beanName, mbd);
+				}
+			}
+  //去掉和这节没关的代码
+  ...
+	return (T) bean;
+}
+```
+
+自定义Scope：
+
+```java
+public class CustomScope implements Scope {
+
+    private ThreadLocal local = new ThreadLocal();
+
+    @Override
+    public Object get(String name, ObjectFactory<?> objectFactory) {
+        if(local.get() != null) {
+            return local.get();
+        } else {
+            //创建实例
+           // 其实就是调用createBean
+            Object object = objectFactory.getObject();
+            local.set(object);
+            return object;
+        }
+    }
+
+    @Override
+    public Object remove(String name) {
+        Object o = local.get();
+        local.remove();
+        return o;
+    }
+
+    @Override
+    public void registerDestructionCallback(String name, Runnable callback) {
+    }
+
+    @Override
+    public Object resolveContextualObject(String key) {
+        return null;
+    }
+
+    @Override
+    public String getConversationId() {
+        return null;
+    }
+}
+```
+
+自定义Scope注册:
+
+```java
+@Component
+public class CustomScopeRegistry implements BeanDefinitionRegistryPostProcessor {
+    @Override
+    public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) throws BeansException {
+
+    }
+
+    @Override
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) throws BeansException {
+        beanFactory.registerScope("refreshScope",new CustomScope());
+    }
+}
+
+```
+
+使用自定义Scope：
+
+```java
+@Component
+@Scope("refreshScope")
+@Data
+public class CustomScopeBean {
+    private String username;
+}
+
+```
+
