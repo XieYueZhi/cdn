@@ -1,0 +1,40 @@
+# BeanDefinition
+
+![image-20210311225701841](media/image-20210311225701841.png)
+
+BeanDefinition的重要属性
+
+这里解析下BeanDefinition，BeanDefinition在Spring中有很多实现，先下图：
+
+![image-20210311231627010](media/image-20210311231627010.png)
+
+每个BeanDefinition，有些许差别，但目的都是一样的，就是作为spring bean实例化前的载体，保存bean的原始信息。
+
+- RootBeanDefinition
+  是在需要实例化时，就会把其他类型的BeanDefinition转化成该类。相当于其他BeanDefinition的汇总。
+  在`AbstractBeanFactory#doGetBean`（也就是beanFactory.getBean）时会调用
+  ![image-20210316223633883](media/image-20210316223633883.png)
+
+- GenericBeanDefinition
+
+  在默认标签bean解析完后把对应的信息封装成该对象，这个是一个通用的BeanDefinition，其他BeanDefinition都会继承它
+
+- ScannedGenericBeanDefinition
+
+  通过扫描得到就会创建该对象，特点就是有注解的信息
+
+  ![image-20210316221945143](media/image-20210316221945143.png)
+
+  
+
+- AnnotatedGenericBeanDefinition
+
+  需要获取注解信息时会把类封装成这个BeanDefinition
+
+  @Import进来的和内部类都会把这些封装成这个BeanDefinition
+
+- ConfigurationClassBeanDefinition
+  这个是在@Bean封装成BeanDefinition时会创建这个，不过这个类是私有的内部类。
+
+  
+
